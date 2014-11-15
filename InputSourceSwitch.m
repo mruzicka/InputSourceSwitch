@@ -487,6 +487,8 @@
 
 @implementation InputSourceSwitchApplication {
 	LockFile *lockFile;
+	DeviceTracker *tracker;
+	BOOL subscribed;
 }
 	+ (instancetype) sharedApplication {
 		return (InputSourceSwitchApplication *) [super sharedApplication];
@@ -520,6 +522,88 @@
 		return self;
 	}
 
+	- (BOOL) createTracker {
+		tracker = [DeviceTracker new];
+		if (!tracker) {
+			NSLog (@"Failed to create DeviceTracker.");
+			return NO;
+		}
+		return YES;
+	}
+
+	- (void) recreateTracker {
+		if (!tracker) {
+			if (![self createTracker]) {
+				_returnValue = 3;
+				[self quitWithData: 0];
+			}
+		}
+	}
+
+	- (void) destroyTracker {
+		if (tracker)
+			tracker = nil;
+	}
+
+	- (void) receiveDectivationNote: (NSNotification *) note {
+		if (subscribed) {
+			NSLog (@"Received dectivation notfication: %@", [note name]);
+			[self destroyTracker];
+		}
+	}
+
+	- (void) receiveActivationNote: (NSNotification *) note {
+		if (subscribed) {
+			NSLog (@"Received activation notfication: %@", [note name]);
+			[self recreateTracker];
+		}
+	}
+
+	- (void) subscribeToNotification: (NSString *) notificationName withSelector: (SEL) notificationSelector {
+		[[[NSWorkspace sharedWorkspace] notificationCenter]
+			addObserver: self
+			selector:    notificationSelector
+			name:        notificationName
+			object:      nil
+		];
+	}
+
+	- (void) unsubscribeFromNotification: (NSString *) notificationName {
+		[[[NSWorkspace sharedWorkspace] notificationCenter]
+			removeObserver: self
+			name:           notificationName
+			object:         nil
+		];
+	}
+
+	- (void) subscribeToNotifications {
+		[self
+			subscribeToNotification: NSWorkspaceWillSleepNotification
+			withSelector:            @selector (receiveDectivationNote:)
+		];
+		[self
+			subscribeToNotification: NSWorkspaceDidWakeNotification
+			withSelector:            @selector (receiveActivationNote:)
+		];
+		[self
+			subscribeToNotification: NSWorkspaceSessionDidResignActiveNotification
+			withSelector:            @selector (receiveDectivationNote:)
+		];
+		[self
+			subscribeToNotification: NSWorkspaceSessionDidBecomeActiveNotification
+			withSelector:            @selector (receiveActivationNote:)
+		];
+		subscribed = YES;
+	}
+
+	- (void) unsubscribeFromNotifications {
+		subscribed = NO;
+		[self unsubscribeFromNotification: NSWorkspaceWillSleepNotification];
+		[self unsubscribeFromNotification: NSWorkspaceDidWakeNotification];
+		[self unsubscribeFromNotification: NSWorkspaceSessionDidResignActiveNotification];
+		[self unsubscribeFromNotification: NSWorkspaceSessionDidBecomeActiveNotification];
+	}
+
 	- (void) runLoop {
 		[self finishLaunching];
 
@@ -545,14 +629,16 @@
 		if (_returnValue)
 			return;
 
-		DeviceTracker *tracker = [DeviceTracker new];
-		if (!tracker) {
-			NSLog (@"Failed to create DeviceTracker.");
-			_returnValue = 2;
-			return;
-		}
+		[self subscribeToNotifications];
 
-		[self runLoop];
+		if (isSessionActive () && ![self createTracker])
+			_returnValue = 2;
+		else
+			[self runLoop];
+
+		[self unsubscribeFromNotifications];
+
+		[self destroyTracker];
 	}
 
 	- (void) quitWithData: (int) data {
@@ -588,6 +674,21 @@
 		memset (&action, 0, sizeof (action));
 		action.sa_handler = handler;
 		return !sigaction (signal, &action, NULL);
+	}
+
+	static BOOL isSessionActive () {
+		NSDictionary *sessionInfo = (__bridge_transfer NSDictionary *) CGSessionCopyCurrentDictionary ();
+		if (!sessionInfo)
+			return NO;
+
+		CFTypeRef isActiveValueRef = (__bridge CFTypeRef) sessionInfo[(__bridge NSString *) kCGSessionOnConsoleKey];
+
+		return
+			isActiveValueRef
+			&&
+			CFGetTypeID (isActiveValueRef) == CFBooleanGetTypeID ()
+			&&
+			CFBooleanGetValue (isActiveValueRef);
 	}
 @end
 
