@@ -1,8 +1,10 @@
+# TODO Makefile to be the source of truth
+
 NAME=InputSourceSwitch
 
 DEFAULT_TARGETDIR=installroot
 TARGETDIR=$(DEFAULT_TARGETDIR)
-BUNDLEDIR=$(TARGETDIR)/Library/$(NAME)
+BUNDLEDIR=$(TARGETDIR)/Applications/$(NAME).app
 BUNDLECONTENTSDIR=$(BUNDLEDIR)/Contents
 BUNDLEBINDIR=$(BUNDLECONTENTSDIR)/MacOS
 AGENTDIR=$(TARGETDIR)/Library/LaunchAgents
@@ -11,9 +13,9 @@ INFOFILE=Info.plist
 AGENTFILE=$(NAME).plist
 
 CFLAGS+=-O3 -fobjc-arc
-LDLIBS=-framework Foundation -framework IOKit -framework Carbon
+LDLIBS=-framework AppKit -framework IOKit -framework Carbon
 
-all: $(NAME)
+all: $(EXEFILE)
 
 $(NAME).o: $(NAME).m $(NAME).h
 
@@ -21,16 +23,13 @@ $(TARGETDIR):
 	install -d $@
 
 $(BUNDLEDIR) $(AGENTDIR): $(TARGETDIR)
-	install -d -m 755 $@
-	touch $@
+	[ -d $@ ] && touch $@ || install -d -m 755 $@
 
 $(BUNDLECONTENTSDIR): $(BUNDLEDIR)
-	install -d -m 755 $@
-	touch $@
+	[ -d $@ ] && touch $@ || install -d -m 755 $@
 
 $(BUNDLEBINDIR): $(BUNDLECONTENTSDIR)
-	install -d -m 755 $@
-	touch $@
+	[ -d $@ ] && touch $@ || install -d -m 755 $@
 
 $(BUNDLECONTENTSDIR)/$(INFOFILE): $(INFOFILE) $(BUNDLECONTENTSDIR)
 	install -m 644 $(INFOFILE) $(BUNDLECONTENTSDIR)
@@ -48,8 +47,8 @@ uninstall:
 	-rm -f $(AGENTDIR)/$(AGENTFILE)
 
 clean:
-	-rm -f *.o
+	-rm -f $(NAME).o
 
 cleanall: clean
-	-rm -f $(NAME)
+	-rm -f $(EXEFILE)
 	-rm -rf $(DEFAULT_TARGETDIR)

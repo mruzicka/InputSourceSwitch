@@ -6,7 +6,7 @@
 	<string>InputSourceSwitch</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>~/Library/InputSourceSwitch/Contents/MacOS/InputSourceSwitch</string>
+		<string>~/Applications/InputSourceSwitch.app/Contents/MacOS/InputSourceSwitch</string>
 	</array>
 	<key>EnableGlobbing</key>
 	<true/>

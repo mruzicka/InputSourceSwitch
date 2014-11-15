@@ -1,6 +1,11 @@
 #import "InputSourceSwitch.h"
+#import <AppKit/AppKit.h>
 #import <IOKit/hid/IOHIDLib.h>
 #import <Carbon/Carbon.h>
+#import <sys/stat.h>
+
+
+#define QuitEventSubType 0x5155
 
 
 @interface DeviceState : NSObject
@@ -385,6 +390,7 @@
 
 @interface LockFile : NSObject
 	@property (readonly) NSURL *url;
+	@property (readonly) BOOL isLocked;
 
 	- (instancetype) initWithAppName: (NSString *) appName;
 	- (BOOL) lock;
@@ -393,7 +399,6 @@
 
 @implementation LockFile {
 	NSFileHandle *handle;
-	BOOL isLocked;
 }
 	- (instancetype) initWithAppName: (NSString *) appName {
 		if (self = [super init]) {
@@ -427,25 +432,39 @@
 	}
 
 	- (instancetype) init {
-		return [self initWithAppName:
-			[[[NSBundle mainBundle] infoDictionary] objectForKey: (__bridge NSString *) kCFBundleExecutableKey]
+		NSString *name = [[[NSBundle mainBundle] infoDictionary]
+			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
 		];
+		if (!name)
+			name = [NSProcessInfo processInfo].processName;
+
+		return [self initWithAppName: name];
 	}
 
 	- (BOOL) lock {
-		if (!isLocked) {
-			isLocked = !flock (handle.fileDescriptor, LOCK_EX|LOCK_NB);
-			if (isLocked) {
-				[handle truncateFileAtOffset: 0];
-				[handle writeData:
-					[[NSString stringWithFormat:
-						@"%d", [[NSProcessInfo processInfo] processIdentifier]
-					] dataUsingEncoding: NSISOLatin1StringEncoding]
-				];
-				[handle synchronizeFile];
-			}
-		}
-		return isLocked;
+		if (_isLocked)
+			return YES;
+
+		if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB))
+			return NO;
+
+		struct stat fsstat, fdstat;
+
+		if (stat (_url.fileSystemRepresentation, &fsstat) || fstat (handle.fileDescriptor, &fdstat))
+			return NO;
+
+		if (!(fsstat.st_dev == fdstat.st_dev && fsstat.st_ino == fdstat.st_ino))
+			return NO;
+
+		[handle truncateFileAtOffset: 0];
+		[handle writeData:
+			[[NSString stringWithFormat:
+				@"%d", [NSProcessInfo processInfo].processIdentifier
+			] dataUsingEncoding: NSISOLatin1StringEncoding]
+		];
+		[handle synchronizeFile];
+
+		return (_isLocked = YES);
 	}
 
 	- (NSString *) read {
@@ -454,55 +473,132 @@
 	}
 
 	- (void) dealloc {
-		if (isLocked)
+		if (_isLocked)
 			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
 	}
 @end
 
 
-static void handleSignalAsTerminationRequest (int signum) {
-	CFRunLoopStop (CFRunLoopGetCurrent ());
-}
+@interface InputSourceSwitchApplication : NSApplication
+	@property (readonly) int returnValue;
 
-static BOOL setupSignalHandler (int signal, void (*handler) (int signum)) {
-	struct sigaction action;
+	+ (instancetype) sharedApplication;
+@end
 
-	memset (&action, 0, sizeof (action));
-	action.sa_handler = handler;
-	return !sigaction (signal, &action, NULL);
+@implementation InputSourceSwitchApplication {
+	LockFile *lockFile;
 }
+	+ (instancetype) sharedApplication {
+		return (InputSourceSwitchApplication *) [super sharedApplication];
+	}
+
+	- (instancetype) init {
+		if (self = [super init]) {
+			if (
+				!setupSignalHandler (SIGTERM, handleSignalAsQuit)
+				||
+				!setupSignalHandler (SIGINT, handleSignalAsQuit)
+			) {
+				NSLog (@"Failed to setup signal handlers.");
+				return nil;
+			}
+
+			lockFile = [LockFile new];
+			if (!lockFile) {
+				NSLog (@"Failed to create lock file.");
+				return nil;
+			}
+
+			if (![lockFile lock]) {
+				NSString *pid = [lockFile read];
+				if ([pid length] > 0)
+					pid = [NSString stringWithFormat: @" (with PID: %@)", pid];
+				NSLog (@"Another instance%@ is already running.", pid);
+				_returnValue = 1;
+			}
+		}
+		return self;
+	}
+
+	- (void) runLoop {
+		[self finishLaunching];
+
+		_running = YES;
+		do {
+			@autoreleasepool {
+				NSEvent *event = [self
+					nextEventMatchingMask: NSAnyEventMask
+					untilDate:             [NSDate distantFuture]
+					inMode:                NSDefaultRunLoopMode
+					dequeue:               YES
+				];
+
+				if (event.type == NSApplicationDefined && event.subtype == QuitEventSubType)
+					_running = NO;
+				else
+					[self sendEvent: event];
+			}
+		} while (_running);
+	}
+
+	- (void) run {
+		if (_returnValue)
+			return;
+
+		DeviceTracker *tracker = [DeviceTracker new];
+		if (!tracker) {
+			NSLog (@"Failed to create DeviceTracker.");
+			_returnValue = 2;
+			return;
+		}
+
+		[self runLoop];
+	}
+
+	- (void) quitWithData: (int) data {
+		[self
+			postEvent: [NSEvent
+				otherEventWithType: NSApplicationDefined
+				location:           NSMakePoint (0, 0)
+				modifierFlags:      0
+				timestamp:          [NSProcessInfo processInfo].systemUptime
+				windowNumber:       0
+				context:            nil
+				subtype:            QuitEventSubType
+				data1:              data
+				data2:              0
+			]
+			atStart: YES
+		];
+	}
+
+	- (void) dealloc {
+		lockFile = nil;
+		setupSignalHandler (SIGTERM, SIG_DFL);
+		setupSignalHandler (SIGINT, SIG_DFL);
+	}
+
+	static void handleSignalAsQuit (int signum) {
+		[NSApp quitWithData: signum];
+	}
+
+	static BOOL setupSignalHandler (int signal, void (*handler) (int signum)) {
+		struct sigaction action;
+
+		memset (&action, 0, sizeof (action));
+		action.sa_handler = handler;
+		return !sigaction (signal, &action, NULL);
+	}
+@end
+
 
 int main (int argc, const char *argv[]) {
-	LockFile *lockFile = [[LockFile alloc] initWithAppName: @"InputSourceSwitch"];
-	if (!lockFile) {
-		NSLog (@"Failed to create lock file.");
-		return 1;
-	}
+	InputSourceSwitchApplication *app = [InputSourceSwitchApplication sharedApplication];
+	if (!app)
+		return 2;
 
-	if (![lockFile lock]) {
-		NSString *pid = [lockFile read];
-		if ([pid length] > 0)
-			pid = [NSString stringWithFormat: @" (with PID: %@)", pid];
-		NSLog (@"Another instance%@ is already running.", pid);
-		return 1;
-	}
+	[app run];
 
-	if (
-		!setupSignalHandler (SIGTERM, handleSignalAsTerminationRequest)
-		||
-		!setupSignalHandler (SIGINT, handleSignalAsTerminationRequest)
-	) {
-		NSLog (@"Failed to setup signal handlers.");
-		return 1;
-	}
-
-	DeviceTracker *tracker = [DeviceTracker new];
-	if (!tracker) {
-		NSLog (@"Failed to create DeviceTracker.");
-		return 1;
-	}
-
-	CFRunLoopRun ();
-
-	return 0;
+	NSApp = nil; // release the global reference to the app
+	return app.returnValue;
 }
