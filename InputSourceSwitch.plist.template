@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>InputSourceSwitch</string>
+	<string>@@@@</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>~/Applications/InputSourceSwitch.app/Contents/MacOS/InputSourceSwitch</string>
+		<string>@@@@</string>
 	</array>
 	<key>EnableGlobbing</key>
 	<true/>
