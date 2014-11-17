@@ -35,12 +35,7 @@
 }
 	- (instancetype) init {
 		if (self = [super init]) {
-			deviceStateMap = CFDictionaryCreateMutable (
-				kCFAllocatorDefault,
-				0,
-				NULL,
-				NULL
-			);
+			deviceStateMap = CFDictionaryCreateMutable (kCFAllocatorDefault, 0, NULL, NULL);
 			if (!deviceStateMap)
 				return nil;
 		}
@@ -75,7 +70,6 @@
 
 
 @interface KeyboardDeviceState : DeviceState
-
 	- (instancetype) initWithCapacity: (uint32_t) capacity;
 	- (void) handleKey: (uint16_t) key status: (BOOL) pressed;
 @end
@@ -102,10 +96,10 @@
 	- (void) performSwitch {
 		NSArray *inputSources = (__bridge_transfer NSArray *) TISCreateInputSourceList (
 			(__bridge CFDictionaryRef) @{
-				(__bridge NSString *) kTISPropertyInputSourceCategory        :
+				(__bridge NSString *) kTISPropertyInputSourceCategory:
 					(__bridge NSString *) kTISCategoryKeyboardInputSource,
-				(__bridge NSString *) kTISPropertyInputSourceIsEnabled       : @YES,
-				(__bridge NSString *) kTISPropertyInputSourceIsSelectCapable : @YES
+				(__bridge NSString *) kTISPropertyInputSourceIsEnabled:       @YES,
+				(__bridge NSString *) kTISPropertyInputSourceIsSelectCapable: @YES
 			},
 			NO
 		);
@@ -285,12 +279,7 @@
 }
 	- (instancetype) init {
 		if (self = [super init]) {
-			deviceHandlerMap = CFDictionaryCreateMutable (
-				kCFAllocatorDefault,
-				0,
-				NULL,
-				&kCFTypeDictionaryValueCallBacks
-			);
+			deviceHandlerMap = CFDictionaryCreateMutable (kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
 			if (!deviceHandlerMap)
 				return nil;
 
@@ -369,8 +358,10 @@
 		if (CFDictionaryContainsKey (tracker->deviceHandlerMap, deviceRef))
 			return;
 
-		KeyboardDeviceHandler *handler = [[KeyboardDeviceHandler alloc] initWithDeviceReference: deviceRef
-			andDeviceStateRegistry: tracker->deviceStateRegistry];
+		KeyboardDeviceHandler *handler = [[KeyboardDeviceHandler alloc]
+			initWithDeviceReference: deviceRef
+			andDeviceStateRegistry:  tracker->deviceStateRegistry
+		];
 		if (!handler)
 			return;
 
@@ -404,11 +395,11 @@
 		if (self = [super init]) {
 			NSFileManager *fileManger = [NSFileManager defaultManager];
 			NSURL *url = [fileManger
-				URLForDirectory: NSApplicationSupportDirectory
-				inDomain: NSUserDomainMask
+				URLForDirectory:   NSApplicationSupportDirectory
+				inDomain:          NSUserDomainMask
 				appropriateForURL: nil
-				create: NO
-				error: nil
+				create:            NO
+				error:             nil
 			];
 			if (!url)
 				return nil;
@@ -457,11 +448,9 @@
 			return NO;
 
 		[handle truncateFileAtOffset: 0];
-		[handle writeData:
-			[[NSString stringWithFormat:
-				@"%d", [NSProcessInfo processInfo].processIdentifier
-			] dataUsingEncoding: NSISOLatin1StringEncoding]
-		];
+		[handle writeData: [[NSString stringWithFormat: @"%d", [NSProcessInfo processInfo].processIdentifier]
+			dataUsingEncoding: NSISOLatin1StringEncoding
+		]];
 		[handle synchronizeFile];
 
 		return (_isLocked = YES);
