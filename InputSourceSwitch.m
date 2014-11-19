@@ -184,6 +184,8 @@
 	IOHIDDeviceRef deviceReference;
 	BOOL opened;
 	KeyboardDeviceState *deviceState;
+	uint32_t fnModifierKeyUsagePage;
+	uint32_t fnModifierKeyUsage;
 }
 	- (instancetype) initWithDeviceReference: (IOHIDDeviceRef) deviceRef andDeviceStateRegistry: deviceStateRegistry {
 		if (self = [super init]) {
@@ -198,45 +200,97 @@
 				return nil;
 			}
 
+			[self identifyFnModifierKey];
+
 			IOReturn rv = IOHIDDeviceOpen (deviceReference, kIOHIDOptionsTypeNone);
 			if (rv != kIOReturnSuccess) {
 				NSLog (@"Failed to open device: %@: 0x%08x", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)), rv);
 				return nil;
 			}
+			opened = YES;
 
 			IOHIDDeviceRegisterInputValueCallback (deviceReference, inputValueCallback, (__bridge void *) self);
 
 			NSLog (@"Added device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
-			opened = YES;
 		}
 		return self;
-	}
-
-	- (void *) deviceLocationTag {
-		CFTypeRef locationIdValue = IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDLocationIDKey));
-		if (locationIdValue) {
-			if (CFGetTypeID (locationIdValue) == CFNumberGetTypeID ())
-				return (void *) ((__bridge NSNumber *) locationIdValue).unsignedIntegerValue;
-		}
-		return NULL;
 	}
 
 	- (instancetype) init {
 		return nil;
 	}
 
-	- (void) dealloc {
-		if (opened) {
-			IOHIDDeviceClose (deviceReference, kIOHIDOptionsTypeNone);
-			NSLog (@"Removed device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
+	- (void) identifyFnModifierKey {
+		io_service_t ioService = IOHIDDeviceGetService (deviceReference);
+		if (ioService == MACH_PORT_NULL)
+			goto fail;
+
+		io_iterator_t childrenIterator;
+
+		if (
+			IORegistryEntryCreateIterator (
+				ioService,
+				kIOServicePlane,
+				kIORegistryIterateRecursively,
+				&childrenIterator
+			) != KERN_SUCCESS
+		)
+			goto fail;
+
+		@try {
+			io_registry_entry_t child;
+
+			while ((child = IOIteratorNext (childrenIterator))) {
+				@try {
+					if (!IOObjectConformsTo (child, kIOHIDEventDriverClass))
+						continue;
+
+					NSMutableDictionary *childProperties;
+
+					if (
+						IORegistryEntryCreateCFProperties (
+							child,
+							(void *) &childProperties,
+							kCFAllocatorDefault,
+							kNilOptions
+						) != KERN_SUCCESS
+					)
+						continue;
+
+					NSNumber *fnUsagePage, *fnUsage;
+
+					if (
+						(fnUsagePage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsagePageKey]))
+						&&
+						(fnUsage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsageKey]))
+					) {
+						fnModifierKeyUsagePage = fnUsagePage.unsignedIntValue;
+						fnModifierKeyUsage = fnUsage.unsignedIntValue;
+						return;
+					}
+				} @finally {
+					IOObjectRelease (child);
+				}
+			}
+		} @finally {
+			IOObjectRelease (childrenIterator);
 		}
+	fail:
+		fnModifierKeyUsagePage = kHIDPage_Undefined;
 	}
 
-	static void inputValueCallback (void *context, IOReturn result, void *sender, IOHIDValueRef valueRef) {
+	- (void *) deviceLocationTag {
+		NSNumber *locationId = ensureNumber (IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDLocationIDKey)));
+
+		return locationId ? (void *) locationId.unsignedIntegerValue : NULL;
+	}
+
+	- (void) handleInputValue: (IOHIDValueRef) valueRef {
 		IOHIDElementRef elem = IOHIDValueGetElement (valueRef);
+		uint32_t usagePage = IOHIDElementGetUsagePage (elem);
 		uint32_t usage;
 
-		switch (IOHIDElementGetUsagePage (elem)) {
+		switch (usagePage) {
 			case kHIDPage_KeyboardOrKeypad:
 				usage = IOHIDElementGetUsage (elem);
 				if (!(usage >= kHIDUsage_KeyboardA && usage <= kHIDUsage_KeyboardRightGUI))
@@ -246,28 +300,42 @@
 			case kHIDPage_Consumer:
 				usage = IOHIDElementGetUsage (elem);
 				if (!(usage == kHIDUsage_Csmr_Eject))
-					return; // not the apple 'Eject' key event
-				usage |= 0x100;
-				break;
-
-			case kHIDPage_AppleVendorTopCase:
-				usage = IOHIDElementGetUsage (elem);
-				if (!(usage == kHIDUsage_AppleVendorKeyboard_Function))
-					return; // not the apple 'Fn' key event
+					return; // not the 'Eject' key event
 				usage |= 0x100;
 				break;
 
 			default:
-				return; // not the type of event we are interested in
+				if (usagePage != fnModifierKeyUsagePage || fnModifierKeyUsagePage == kHIDPage_Undefined)
+					return; // not anything we care about
+				usage = IOHIDElementGetUsage (elem);
+				if (!(usage == fnModifierKeyUsage))
+					return; // not the Apple 'Fn' modifier key event
+				usage = kHIDUsage_AppleVendorKeyboard_Function | 0x100;
+				break;
 		}
 
 		CFIndex valueLength = IOHIDValueGetLength (valueRef);
 		if (valueLength == 0 || valueLength > 8)
 			return; // not an expected value
 
-		CFIndex value = IOHIDValueGetIntegerValue (valueRef);
+		[deviceState handleKey: (uint16_t) usage status: IOHIDValueGetIntegerValue (valueRef) != 0];
+	}
 
-		[((__bridge KeyboardDeviceHandler *) context)->deviceState handleKey: (uint16_t) usage status: value != 0];
+	- (void) dealloc {
+		if (opened) {
+			IOHIDDeviceClose (deviceReference, kIOHIDOptionsTypeNone);
+			NSLog (@"Removed device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
+		}
+	}
+
+	static NSNumber *ensureNumber (CFTypeRef reference) {
+		return (reference && CFGetTypeID (reference) == CFNumberGetTypeID ())
+			? (__bridge NSNumber *) reference
+			: nil;
+	}
+
+	static void inputValueCallback (void *context, IOReturn result, void *sender, IOHIDValueRef valueRef) {
+		[(__bridge KeyboardDeviceHandler *) context handleInputValue: valueRef];
 	}
 @end
 
