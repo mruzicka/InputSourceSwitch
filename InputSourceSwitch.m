@@ -1,11 +1,8 @@
-#import "InputSourceSwitch.h"
 #import <AppKit/AppKit.h>
 #import <IOKit/hid/IOHIDLib.h>
 #import <Carbon/Carbon.h>
 #import <sys/stat.h>
-
-
-#define QuitEventSubType 0x5155
+#import "InputSourceSwitch.h"
 
 
 @interface DeviceState : NSObject
@@ -339,6 +336,9 @@
 	}
 @end
 
+
+@interface DeviceTracker : NSObject
+@end
 
 @implementation DeviceTracker {
 	IOHIDManagerRef hidManager;
