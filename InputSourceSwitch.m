@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <IOKit/hid/IOHIDLib.h>
+#import <IOKit/IOMessage.h>
 #import <Carbon/Carbon.h>
 #import <sys/stat.h>
 #import "InputSourceSwitch.h"
@@ -183,6 +184,8 @@
 	KeyboardDeviceState *deviceState;
 	uint32_t fnModifierKeyUsagePage;
 	uint32_t fnModifierKeyUsage;
+	IONotificationPortRef busyStateNotifyPort;
+	io_object_t busyStateNotification;
 }
 	- (instancetype) initWithDeviceReference: (IOHIDDeviceRef) deviceRef andDeviceStateRegistry: deviceStateRegistry {
 		if (self = [super init]) {
@@ -197,7 +200,7 @@
 				return nil;
 			}
 
-			[self identifyFnModifierKey];
+			[self initiateFnModifierKeyIdentification];
 
 			IOReturn rv = IOHIDDeviceOpen (deviceReference, kIOHIDOptionsTypeNone);
 			if (rv != kIOReturnSuccess) {
@@ -217,63 +220,95 @@
 		return nil;
 	}
 
-	- (void) identifyFnModifierKey {
-		io_service_t ioService = IOHIDDeviceGetService (deviceReference);
-		if (ioService == MACH_PORT_NULL)
-			goto fail;
+	- (void) initiateFnModifierKeyIdentification {
+		fnModifierKeyUsagePage = kHIDPage_Undefined;
 
+		io_service_t service = IOHIDDeviceGetService (deviceReference);
+		if (service == MACH_PORT_NULL)
+			return;
+
+		busyStateNotifyPort = IONotificationPortCreate (kIOMasterPortDefault);
+		if (!busyStateNotifyPort)
+			return;
+
+		if (
+			IOServiceAddInterestNotification (
+				busyStateNotifyPort,
+				service,
+				kIOBusyInterest,
+				busyStateChangeCallback,
+				(__bridge void *) self,
+				&busyStateNotification
+			) != KERN_SUCCESS
+		) {
+			IONotificationPortDestroy (busyStateNotifyPort);
+			busyStateNotifyPort = NULL;
+			return;
+		}
+
+		uint32_t busyState;
+
+		if (
+			IOServiceGetBusyState (service, &busyState) != KERN_SUCCESS
+			||
+			(busyStateChangeCallback (
+				(__bridge void *) self,
+				service,
+				kIOMessageServiceBusyStateChange,
+				(void *) (NSUInteger) busyState
+			), busyStateNotifyPort)
+		)
+			CFRunLoopAddSource (
+				CFRunLoopGetMain (),
+				IONotificationPortGetRunLoopSource (busyStateNotifyPort),
+				kCFRunLoopDefaultMode
+			);
+	}
+
+	- (void) identifyFnModifierKey: (io_service_t) service {
 		io_iterator_t childrenIterator;
 
 		if (
 			IORegistryEntryCreateIterator (
-				ioService,
+				service,
 				kIOServicePlane,
 				kIORegistryIterateRecursively,
 				&childrenIterator
 			) != KERN_SUCCESS
 		)
-			goto fail;
+			return;
 
-		@try {
-			io_registry_entry_t child;
+		for (io_registry_entry_t child; (child = IOIteratorNext (childrenIterator)); IOObjectRelease (child)) {
+			if (!IOObjectConformsTo (child, kIOHIDEventDriverClass))
+				continue;
 
-			while ((child = IOIteratorNext (childrenIterator))) {
-				@try {
-					if (!IOObjectConformsTo (child, kIOHIDEventDriverClass))
-						continue;
+			NSMutableDictionary *childProperties;
 
-					NSMutableDictionary *childProperties;
+			if (
+				IORegistryEntryCreateCFProperties (
+					child,
+					(void *) &childProperties,
+					kCFAllocatorDefault,
+					kNilOptions
+				) != KERN_SUCCESS
+			)
+				continue;
 
-					if (
-						IORegistryEntryCreateCFProperties (
-							child,
-							(void *) &childProperties,
-							kCFAllocatorDefault,
-							kNilOptions
-						) != KERN_SUCCESS
-					)
-						continue;
+			NSNumber *fnUsagePage, *fnUsage;
 
-					NSNumber *fnUsagePage, *fnUsage;
-
-					if (
-						(fnUsagePage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsagePageKey]))
-						&&
-						(fnUsage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsageKey]))
-					) {
-						fnModifierKeyUsagePage = fnUsagePage.unsignedIntValue;
-						fnModifierKeyUsage = fnUsage.unsignedIntValue;
-						return;
-					}
-				} @finally {
-					IOObjectRelease (child);
-				}
+			if (
+				(fnUsagePage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsagePageKey]))
+				&&
+				(fnUsage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsageKey]))
+			) {
+				fnModifierKeyUsagePage = fnUsagePage.unsignedIntValue;
+				fnModifierKeyUsage = fnUsage.unsignedIntValue;
+				IOObjectRelease (child);
+				break;
 			}
-		} @finally {
-			IOObjectRelease (childrenIterator);
 		}
-	fail:
-		fnModifierKeyUsagePage = kHIDPage_Undefined;
+
+		IOObjectRelease (childrenIterator);
 	}
 
 	- (void *) deviceLocationTag {
@@ -319,6 +354,10 @@
 	}
 
 	- (void) dealloc {
+		if (busyStateNotifyPort) {
+			IOObjectRelease (busyStateNotification);
+			IONotificationPortDestroy (busyStateNotifyPort); // this releases the associated CFRunLoopSource
+		}
 		if (opened) {
 			IOHIDDeviceClose (deviceReference, kIOHIDOptionsTypeNone);
 			NSLog (@"Removed device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
@@ -333,6 +372,22 @@
 
 	static void inputValueCallback (void *context, IOReturn result, void *sender, IOHIDValueRef valueRef) {
 		[(__bridge KeyboardDeviceHandler *) context handleInputValue: valueRef];
+	}
+
+	static void busyStateChangeCallback (void *context, io_service_t service, uint32_t messageType, void *messageArgument) {
+		if (messageType != kIOMessageServiceBusyStateChange)
+			return;
+
+		if ((uint32_t) messageArgument)
+			return; // busyState > 0
+
+		KeyboardDeviceHandler *handler = (__bridge KeyboardDeviceHandler *) context;
+
+		IOObjectRelease (handler->busyStateNotification);
+		IONotificationPortDestroy (handler->busyStateNotifyPort); // this releases the associated CFRunLoopSource
+		handler->busyStateNotifyPort = NULL;
+
+		[handler identifyFnModifierKey: service];
 	}
 @end
 
