@@ -5,6 +5,10 @@
 #import <sys/stat.h>
 #import "InputSourceSwitch.h"
 
+#define SLAVE_EXIT_CODE 127
+#define LOCKFILE_ENCODING NSISOLatin1StringEncoding
+#define LOCKFILE_FD 15
+
 
 @interface DeviceState : NSObject
 	- (void) setDeallocBlock: (void (^) ()) block;
@@ -502,95 +506,6 @@
 @end
 
 
-@interface LockFile : NSObject
-	@property (readonly) NSURL *url;
-	@property (readonly) BOOL isLocked;
-
-	- (instancetype) initWithAppName: (NSString *) appName;
-	- (BOOL) lock;
-	- (NSString *) read;
-@end
-
-@implementation LockFile {
-	NSFileHandle *handle;
-}
-	- (instancetype) initWithAppName: (NSString *) appName {
-		if (self = [super init]) {
-			NSFileManager *fileManger = [NSFileManager defaultManager];
-			NSURL *url = [fileManger
-				URLForDirectory:   NSApplicationSupportDirectory
-				inDomain:          NSUserDomainMask
-				appropriateForURL: nil
-				create:            NO
-				error:             nil
-			];
-			if (!url)
-				return nil;
-
-			url = [url URLByAppendingPathComponent: appName isDirectory: YES];
-
-			if (![fileManger createDirectoryAtURL: url withIntermediateDirectories: YES attributes: nil error: nil])
-				return nil;
-
-			_url = [url URLByAppendingPathComponent: @".lockfile" isDirectory: NO];
-
-			int fd = open (_url.fileSystemRepresentation, O_RDWR|O_CREAT, 0644);
-			if (fd == -1)
-				return nil;
-
-			handle = [[NSFileHandle alloc] initWithFileDescriptor: fd closeOnDealloc: YES];
-			if (!handle)
-				return nil;
-		}
-		return self;
-	}
-
-	- (instancetype) init {
-		NSString *name = [[[NSBundle mainBundle] infoDictionary]
-			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
-		];
-		if (!name)
-			name = [NSProcessInfo processInfo].processName;
-
-		return [self initWithAppName: name];
-	}
-
-	- (BOOL) lock {
-		if (_isLocked)
-			return YES;
-
-		if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB))
-			return NO;
-
-		struct stat fsstat, fdstat;
-
-		if (stat (_url.fileSystemRepresentation, &fsstat) || fstat (handle.fileDescriptor, &fdstat))
-			return NO;
-
-		if (!(fsstat.st_dev == fdstat.st_dev && fsstat.st_ino == fdstat.st_ino))
-			return NO;
-
-		[handle truncateFileAtOffset: 0];
-		[handle writeData: [[NSString stringWithFormat: @"%d", [NSProcessInfo processInfo].processIdentifier]
-			dataUsingEncoding: NSISOLatin1StringEncoding
-		]];
-		[handle synchronizeFile];
-
-		return (_isLocked = YES);
-	}
-
-	- (NSString *) read {
-		[handle seekToFileOffset: 0];
-		return [[NSString alloc] initWithData: [handle readDataOfLength: 1024] encoding: NSISOLatin1StringEncoding];
-	}
-
-	- (void) dealloc {
-		if (_isLocked)
-			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
-	}
-@end
-
-
 @interface InputSourceSwitchApplication : NSApplication
 	@property (readonly) int returnValue;
 
@@ -598,7 +513,6 @@
 @end
 
 @implementation InputSourceSwitchApplication {
-	LockFile *lockFile;
 	DeviceTracker *tracker;
 	BOOL subscribed;
 }
@@ -608,27 +522,9 @@
 
 	- (instancetype) init {
 		if (self = [super init]) {
-			if (
-				!setupSignalHandler (SIGTERM, handleSignalAsQuit)
-				||
-				!setupSignalHandler (SIGINT, handleSignalAsQuit)
-			) {
+			if (!setupSignalHandlers (handleSignalAsQuit, NO)) {
 				NSLog (@"Failed to setup signal handlers.");
 				return nil;
-			}
-
-			lockFile = [LockFile new];
-			if (!lockFile) {
-				NSLog (@"Failed to create lock file.");
-				return nil;
-			}
-
-			if (![lockFile lock]) {
-				NSString *pid = [lockFile read];
-				if ([pid length] > 0)
-					pid = [NSString stringWithFormat: @" (with PID: %@)", pid];
-				NSLog (@"Another instance%@ is already running.", pid);
-				_returnValue = 1;
 			}
 		}
 		return self;
@@ -771,21 +667,39 @@
 	}
 
 	- (void) dealloc {
-		lockFile = nil;
-		setupSignalHandler (SIGTERM, SIG_DFL);
-		setupSignalHandler (SIGINT, SIG_DFL);
+		setupSignalHandlers (SIG_DFL, NO);
 	}
 
 	static void handleSignalAsQuit (int signum) {
 		[NSApp quitWithData: signum];
 	}
 
-	static BOOL setupSignalHandler (int signal, void (*handler) (int signum)) {
+	static BOOL maskSignals (int how) {
+		sigset_t set;
+
+		sigemptyset (&set);
+		sigaddset (&set, SIGTERM);
+		sigaddset (&set, SIGINT);
+
+		return !sigprocmask (how, &set, NULL);
+	}
+
+	static BOOL setupSignalHandler (int signal, void (*handler) (int signum), BOOL restart) {
 		struct sigaction action;
 
 		memset (&action, 0, sizeof (action));
 		action.sa_handler = handler;
+		if (restart)
+			action.sa_flags = SA_RESTART;
+
 		return !sigaction (signal, &action, NULL);
+	}
+
+	static BOOL setupSignalHandlers (void (*handler) (int signum), BOOL restart) {
+		return
+			setupSignalHandler (SIGTERM, handler, restart)
+			&&
+			setupSignalHandler (SIGINT, handler, restart);
 	}
 
 	static BOOL isSessionActive () {
@@ -805,13 +719,347 @@
 @end
 
 
-int main (int argc, const char *argv[]) {
-	InputSourceSwitchApplication *app = [InputSourceSwitchApplication sharedApplication];
-	if (!app)
-		return 2;
+@interface LockFile : NSObject
+	@property (readonly) NSURL *url;
+	@property (readonly) BOOL isLocked;
 
-	[app run];
+	- (instancetype) initWithAppName: (NSString *) appName;
+	- (BOOL) ensureLocked;
+	- (BOOL) handDown;
+@end
 
-	NSApp = nil; // release the global reference to the app
-	return app.returnValue;
+@implementation LockFile {
+	NSFileHandle *handle;
+}
+	- (instancetype) init {
+		if (fcntl (LOCKFILE_FD, F_GETFD) != -1) {
+			// we've inherited a lockfile
+			int fd = dup (LOCKFILE_FD);
+
+			close (LOCKFILE_FD);
+
+			return [self initWithFd: fd];
+		}
+
+		// we need to create our own lockfile
+		NSString *name = [[[NSBundle mainBundle] infoDictionary]
+			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
+		];
+		if (!name)
+			name = [NSProcessInfo processInfo].processName;
+
+		return [self initWithAppName: name];
+	}
+
+	- (instancetype) initWithFd: (int) fd {
+		if (!(self = [super init]))
+			return nil;
+
+		return [self finishInit: fd];
+	}
+
+	- (instancetype) initWithAppName: (NSString *) appName {
+		if (!(self = [super init]))
+			return nil;
+
+		return [self finishInit: [self open: appName]];
+	}
+
+	- (instancetype) __attribute__ ((objc_method_family (init))) finishInit: (int) fd {
+		if (fd == -1)
+			return nil;
+
+		handle = [[NSFileHandle alloc] initWithFileDescriptor: fd closeOnDealloc: YES];
+		if (!handle) {
+			close (fd);
+			return nil;
+		}
+
+		return self;
+	}
+
+	- (int) open: (NSString *) appName {
+		NSFileManager *fileManager = [NSFileManager defaultManager];
+		NSURL *url = [fileManager
+			URLForDirectory:   NSApplicationSupportDirectory
+			inDomain:          NSUserDomainMask
+			appropriateForURL: nil
+			create:            NO
+			error:             nil
+		];
+		if (!url)
+			return -1;
+
+		url = [url URLByAppendingPathComponent: appName isDirectory: YES];
+		_url = [url URLByAppendingPathComponent: @".lockfile" isDirectory: NO];
+
+		if (![fileManager createDirectoryAtURL: url withIntermediateDirectories: YES attributes: nil error: nil])
+			return -1;
+
+		return open (_url.fileSystemRepresentation, O_RDWR|O_CREAT, 0644);
+	}
+
+	- (BOOL) ensureLocked {
+		if (_isLocked)
+			return YES;
+
+		if (_url) {
+			if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB)) {
+				logAnotherInstance ([self readPid]);
+				return NO;
+			}
+
+			if (![self isOwned]) {
+				NSLog (@"Lockfile ownership verification failed.");
+				return NO;
+			}
+
+			[self writePid];
+		} else {
+			int pid = [self readPid];
+
+			if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB) || pid != getppid ()) {
+				logAnotherInstance (pid);
+				return NO;
+			}
+		}
+
+		return (_isLocked = YES);
+	}
+
+	- (BOOL) isOwned {
+		struct stat fsstat, fdstat;
+
+		if (stat (_url.fileSystemRepresentation, &fsstat) || fstat (handle.fileDescriptor, &fdstat))
+			return NO;
+
+		return (fsstat.st_dev == fdstat.st_dev && fsstat.st_ino == fdstat.st_ino);
+	}
+
+	- (int) readPid {
+		[handle seekToFileOffset: 0];
+		return [[NSString alloc]
+			initWithData: [handle readDataOfLength: 1024]
+			encoding: LOCKFILE_ENCODING
+		].intValue;
+	}
+
+	- (void) writePid {
+		[handle truncateFileAtOffset: 0];
+		[handle
+			writeData: [[NSString stringWithFormat: @"%d", getpid ()]
+				dataUsingEncoding: LOCKFILE_ENCODING
+			]
+		];
+		[handle synchronizeFile];
+	}
+
+	- (BOOL) handDown {
+		// release _url so that the lockfile is not removed on dealloc
+		_url = nil;
+
+		int fd = dup2 (handle.fileDescriptor, LOCKFILE_FD);
+
+		// release handle so that the original fd is closed
+		handle = nil;
+
+		return (fd != -1);
+	}
+
+	- (void) dealloc {
+		if (_isLocked && [self isOwned])
+			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
+	}
+
+	static void logAnotherInstance (int pid) {
+		NSLog (@"Another instance%@ is already running.",
+			(pid > 0) ? [NSString stringWithFormat: @" (with PID %d)", pid] : @""
+		);
+	}
+
+	static uid_t giveupSuidPrivileges () {
+		uid_t ruid = getuid ();
+		uid_t euid = geteuid ();
+
+		if (ruid != euid)
+			seteuid (ruid);
+		else
+			euid = -1;
+
+		return euid;
+	}
+
+	static gid_t giveupSgidPrivileges () {
+		gid_t rgid = getgid ();
+		gid_t egid = getegid ();
+
+		if (rgid != egid)
+			setegid (rgid);
+		else
+			egid = -1;
+
+		return egid;
+	}
+
+	static uid_t assumeSuidIdentity () {
+		uid_t ruid = getuid ();
+		uid_t euid = geteuid ();
+
+		if (ruid != euid)
+			setuid (euid);
+		else
+			ruid = -1;
+
+		return ruid;
+	}
+
+	static gid_t assumeSgidIdentity () {
+		gid_t rgid = getgid ();
+		gid_t egid = getegid ();
+
+		if (rgid != egid)
+			setgid (egid);
+		else
+			rgid = -1;
+
+		return rgid;
+	}
+
+	static void restoreSuidPrivileges (uid_t suid) {
+		if (suid != -1)
+			seteuid (suid);
+	}
+
+	static void restoreSgidPrivileges (gid_t sgid) {
+		if (sgid != -1)
+			setegid (sgid);
+	}
+
+	static NSObject *runUnprivileged (NSObject *(^block) ()) {
+		uid_t suid = giveupSuidPrivileges ();
+		gid_t sgid = giveupSgidPrivileges ();
+
+		@try {
+			return block ();
+		} @finally {
+			restoreSuidPrivileges (suid);
+			restoreSgidPrivileges (sgid);
+		}
+	}
+@end
+
+
+static pid_t slave;
+
+
+static void forwardSignal (int signum) {
+	kill (slave, signum);
+}
+
+int main (int argc, char * const argv[]) {
+	LockFile *lockFile = (LockFile *) runUnprivileged (^ {return [LockFile new];});
+	int rv;
+
+	if (!lockFile) {
+		NSLog (@"Failed to create lockfile.");
+		goto error_exit;
+	}
+
+	if (![lockFile ensureLocked])
+		goto error_exit;
+
+	if (!issetugid ()) {
+		// not running as issetugid - we can do our job
+		InputSourceSwitchApplication *app = [InputSourceSwitchApplication sharedApplication];
+		if (!app)
+			goto error_exit;
+
+		[app run];
+
+		NSApp = nil; // release the global reference to the app
+		rv = app.returnValue;
+		goto normal_exit;
+	}
+
+	if (!maskSignals (SIG_BLOCK)) {
+		NSLog (@"Failed to block signals: %s", strerror (errno));
+		goto error_exit;
+	}
+
+	switch (slave = fork ()) {
+		case -1: { // error
+			NSLog (@"Failed to fork: %s", strerror (errno));
+			goto error_exit;
+		}
+		case 0: { // child/slave
+			if (!maskSignals (SIG_UNBLOCK)) {
+				NSLog (@"Failed to unblock signals: %s", strerror (errno));
+				_exit (SLAVE_EXIT_CODE);
+			}
+
+			if (![lockFile handDown]) {
+				NSLog (@"Failed to hand down lockfile.");
+				_exit (SLAVE_EXIT_CODE);
+			}
+
+			// get rid of the issetugid stigma
+			assumeSuidIdentity ();
+			assumeSgidIdentity ();
+
+			// restart so that issetugid () returns false
+			execvp (*argv, argv);
+
+			NSLog (@"Failed to exec slave: %s", strerror (errno));
+			_exit (SLAVE_EXIT_CODE);
+		}
+		default: { // parent/master
+			if (!setupSignalHandlers (forwardSignal, YES)) {
+				kill (slave, SIGTERM);
+				NSLog (@"Failed to setup signal handlers: %s", strerror (errno));
+				goto error_exit;
+			}
+			if (!maskSignals (SIG_UNBLOCK)) {
+				kill (slave, SIGTERM);
+				NSLog (@"Failed to unblock signals: %s", strerror (errno));
+				goto error_exit;
+			}
+
+			int status;
+			rv = waitpid (slave, &status, 0);
+
+			setupSignalHandlers (SIG_DFL, NO);
+
+			if (rv == -1) {
+				kill (slave, SIGTERM);
+				NSLog (@"Failed to wait for slave: %s", strerror (errno));
+				goto error_exit;
+			}
+
+			if (WIFEXITED (status)) {
+				rv = WEXITSTATUS (status);
+				goto normal_exit;
+			}
+
+			if (WIFSIGNALED (status)) {
+				int signum = WTERMSIG (status);
+				NSLog (@"Slave was terminated by signal: %d (SIG%@)", signum, [@(sys_signame[signum]) uppercaseString]);
+				goto error_exit;
+			}
+
+			NSLog (@"Slave terminated with unexpected status: 0x%08x", status);
+			goto error_exit;
+		}
+	}
+
+error_exit:
+	rv = 2;
+
+normal_exit:
+	lockFile = nil;
+
+	// give up privileges before exiting
+	giveupSuidPrivileges ();
+	giveupSgidPrivileges ();
+
+	return rv;
 }
