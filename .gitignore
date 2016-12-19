@@ -1,3 +1,4 @@
+KeyboardMonitor
 InputSourceSwitch
-InputSourceSwitch.o
+*.o
 installroot/

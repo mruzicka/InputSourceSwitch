@@ -1,569 +1,164 @@
+#import "ISSUtils.h"
 #import <AppKit/AppKit.h>
-#import <IOKit/hid/IOHIDLib.h>
-#import <IOKit/IOMessage.h>
 #import <Carbon/Carbon.h>
 #import <sys/stat.h>
+#import <bsm/libbsm.h>
+
 #import "InputSourceSwitch.h"
 
-#define SLAVE_EXIT_CODE 127
-#define LOCKFILE_ENCODING NSISOLatin1StringEncoding
-#define LOCKFILE_FD 15
+
+#ifndef ISS_MONITOR_EXECUTABLE
+#define ISS_MONITOR_EXECUTABLE "KeyboardMonitor"
+#endif
+
+#define ISS_LOCKFILE_ENCODING NSISOLatin1StringEncoding
+
+#define ISS_QUIT_EVENT_SUBTYPE 0x5155
+
+#define ISS_ERROR_EXIT_CODE 127
 
 
-@interface DeviceState : NSObject
-	- (void) setDeallocBlock: (void (^) ()) block;
+@interface LockFile : NSObject
+	@property (readonly) NSURL *url;
+	@property (readonly) BOOL isLocked;
+
+	- (instancetype) initWithAppName: (NSString *) appName;
+	- (BOOL) lock;
 @end
 
-@implementation DeviceState {
-	void (^deallocBlock) ();
-}
-	- (void) setDeallocBlock: (void (^) ()) block {
-		deallocBlock = block;
-	}
-
-	- (void) dealloc {
-		if (deallocBlock)
-			deallocBlock ();
-	}
-@end
-
-
-@interface DeviceStateRegistry : NSObject
-	- (DeviceState *) registeredDeviceStateForTag: (void *) tag orRegister: (DeviceState *(^) ()) block;
-@end
-
-@implementation DeviceStateRegistry {
-	CFMutableDictionaryRef deviceStateMap;
+@implementation LockFile {
+	NSFileHandle *handle;
 }
 	- (instancetype) init {
-		if (self = [super init]) {
-			deviceStateMap = CFDictionaryCreateMutable (kCFAllocatorDefault, 0, NULL, NULL);
-			if (!deviceStateMap)
-				return nil;
-		}
-		return self;
-	}
-
-	- (DeviceState *) registeredDeviceStateForTag: (void *) tag orRegister: (DeviceState *(^) ()) block {
-		if (!tag)
-			return block ();
-
-		DeviceState *state = (__bridge DeviceState *) CFDictionaryGetValue (deviceStateMap, tag);
-		if (state)
-			return state;
-
-		state = block ();
-		if (!state)
-			return nil;
-
-		[state setDeallocBlock: ^ {
-			CFDictionaryRemoveValue (deviceStateMap, tag);
-		}];
-		CFDictionarySetValue (deviceStateMap, tag, (__bridge void *) state);
-
-		return state;
-	}
-
-	- (void) dealloc {
-		if (deviceStateMap)
-			CFRelease (deviceStateMap);
-	}
-@end
-
-
-@interface KeyboardDeviceState : DeviceState
-	- (instancetype) initWithCapacity: (uint32_t) capacity;
-	- (void) handleKey: (uint16_t) key status: (BOOL) pressed;
-@end
-
-@implementation KeyboardDeviceState {
-	CFMutableBitVectorRef keyStates;
-	uint16_t pressedKeysCount;
-	uint8_t switchState;
-}
-	- (instancetype) initWithCapacity: (uint32_t) capacity {
-		if (self = [super init]) {
-			keyStates = CFBitVectorCreateMutable (kCFAllocatorDefault, capacity);
-			if (!keyStates)
-				return nil;
-			CFBitVectorSetCount (keyStates, capacity);
-		}
-		return self;
-	}
-
-	- (instancetype) init {
-		return [self initWithCapacity: 0];
-	}
-
-	- (void) performSwitch {
-		NSArray *inputSources = (__bridge_transfer NSArray *) TISCreateInputSourceList (
-			(__bridge CFDictionaryRef) @{
-				(__bridge NSString *) kTISPropertyInputSourceCategory:
-					(__bridge NSString *) kTISCategoryKeyboardInputSource,
-				(__bridge NSString *) kTISPropertyInputSourceIsEnabled:       @YES,
-				(__bridge NSString *) kTISPropertyInputSourceIsSelectCapable: @YES
-			},
-			NO
-		);
-
-		if ([inputSources count] < 2)
-			return; // no point to switch if less than two sources are available
-
-		[inputSources enumerateObjectsUsingBlock: ^ (id element, NSUInteger idx, BOOL *stop) {
-			TISInputSourceRef inputSource = (__bridge TISInputSourceRef) element;
-			CFTypeRef isSelectedValueRef = (CFTypeRef) TISGetInputSourceProperty (
-				inputSource,
-				kTISPropertyInputSourceIsSelected
-			);
-
-			if (
-				isSelectedValueRef
-				&&
-				CFGetTypeID (isSelectedValueRef) == CFBooleanGetTypeID ()
-				&&
-				CFBooleanGetValue (isSelectedValueRef)
-			) {
-				idx = (idx + 1) % [inputSources count];
-				TISSelectInputSource ((__bridge TISInputSourceRef) inputSources[idx]);
-				*stop = YES;
-			}
-		}];
-	}
-
-	- (void) handleKey: (uint16_t) key status: (BOOL) pressed {
-		if (CFBitVectorGetBitAtIndex (keyStates, (CFIndex) key) ^ (CFBit) pressed) {
-			CFBitVectorSetBitAtIndex (keyStates, (CFIndex) key, (CFBit) pressed);
-			pressed ? ++pressedKeysCount : --pressedKeysCount;
-		}
-
-		switch (switchState) {
-			case 0:
-				if (pressed && key == kHIDUsage_KeyboardLeftAlt && pressedKeysCount == 1) {
-					// L-Alt pressed on its own
-					switchState = 1;
-					return;
-				}
-				break;
-
-			case 1:
-				if (pressed && key == kHIDUsage_KeyboardLeftShift) {
-					// L-Shift pressed
-					switchState = 2;
-					return;
-				}
-				break;
-
-			default:
-				if (pressed)
-					break;
-
-				switch (key) {
-					case kHIDUsage_KeyboardLeftShift:
-						// L-Shift released
-						[self performSwitch];
-						switchState = 1;
-						return;
-					case kHIDUsage_KeyboardLeftAlt:
-						// L-Alt released
-						[self performSwitch];
-				}
-		}
-		switchState = 0;
-	}
-
-	- (void) dealloc {
-		if (keyStates)
-			CFRelease (keyStates);
-	}
-@end
-
-
-@interface KeyboardDeviceHandler : NSObject
-	- (instancetype) initWithDeviceReference: (IOHIDDeviceRef) deviceRef andDeviceStateRegistry: registry;
-@end
-
-@implementation KeyboardDeviceHandler {
-	IOHIDDeviceRef deviceReference;
-	BOOL opened;
-	KeyboardDeviceState *deviceState;
-	uint32_t fnModifierKeyUsagePage;
-	uint32_t fnModifierKeyUsage;
-	IONotificationPortRef busyStateNotifyPort;
-	io_object_t busyStateNotification;
-}
-	- (instancetype) initWithDeviceReference: (IOHIDDeviceRef) deviceRef andDeviceStateRegistry: deviceStateRegistry {
-		if (self = [super init]) {
-			if (!(deviceReference = deviceRef))
-				return nil;
-
-			deviceState = (KeyboardDeviceState *) [deviceStateRegistry registeredDeviceStateForTag: [self deviceLocationTag] orRegister: ^ {
-				return [[KeyboardDeviceState alloc] initWithCapacity: 0x200];
-			}];
-			if (!deviceState) {
-				NSLog (@"Failed to obtain device state for device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
-				return nil;
-			}
-
-			[self initiateFnModifierKeyIdentification];
-
-			IOReturn rv = IOHIDDeviceOpen (deviceReference, kIOHIDOptionsTypeNone);
-			if (rv != kIOReturnSuccess) {
-				NSLog (@"Failed to open device: %@: 0x%08x", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)), rv);
-				return nil;
-			}
-			opened = YES;
-
-			IOHIDDeviceRegisterInputValueCallback (deviceReference, inputValueCallback, (__bridge void *) self);
-
-			NSLog (@"Added device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
-		}
-		return self;
-	}
-
-	- (instancetype) init {
-		return nil;
-	}
-
-	- (void) initiateFnModifierKeyIdentification {
-		fnModifierKeyUsagePage = kHIDPage_Undefined;
-
-		io_service_t service = IOHIDDeviceGetService (deviceReference);
-		if (service == MACH_PORT_NULL)
-			return;
-
-		busyStateNotifyPort = IONotificationPortCreate (kIOMasterPortDefault);
-		if (!busyStateNotifyPort)
-			return;
-
-		if (
-			IOServiceAddInterestNotification (
-				busyStateNotifyPort,
-				service,
-				kIOBusyInterest,
-				busyStateChangeCallback,
-				(__bridge void *) self,
-				&busyStateNotification
-			) != KERN_SUCCESS
-		) {
-			IONotificationPortDestroy (busyStateNotifyPort);
-			busyStateNotifyPort = NULL;
-			return;
-		}
-
-		uint32_t busyState;
-
-		if (
-			IOServiceGetBusyState (service, &busyState) != KERN_SUCCESS
-			||
-			(busyStateChangeCallback (
-				(__bridge void *) self,
-				service,
-				kIOMessageServiceBusyStateChange,
-				(void *) (NSUInteger) busyState
-			), busyStateNotifyPort)
-		)
-			CFRunLoopAddSource (
-				CFRunLoopGetMain (),
-				IONotificationPortGetRunLoopSource (busyStateNotifyPort),
-				kCFRunLoopDefaultMode
-			);
-	}
-
-	- (void) identifyFnModifierKey: (io_service_t) service {
-		io_iterator_t childrenIterator;
-
-		if (
-			IORegistryEntryCreateIterator (
-				service,
-				kIOServicePlane,
-				kIORegistryIterateRecursively,
-				&childrenIterator
-			) != KERN_SUCCESS
-		)
-			return;
-
-		for (io_registry_entry_t child; (child = IOIteratorNext (childrenIterator)); IOObjectRelease (child)) {
-			if (!IOObjectConformsTo (child, kIOHIDEventDriverClass))
-				continue;
-
-			NSMutableDictionary *childProperties;
-
-			if (
-				IORegistryEntryCreateCFProperties (
-					child,
-					(void *) &childProperties,
-					kCFAllocatorDefault,
-					kNilOptions
-				) != KERN_SUCCESS
-			)
-				continue;
-
-			NSNumber *fnUsagePage, *fnUsage;
-
-			if (
-				(fnUsagePage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsagePageKey]))
-				&&
-				(fnUsage = ensureNumber ((__bridge CFTypeRef) childProperties[@kFnModifierUsageKey]))
-			) {
-				fnModifierKeyUsagePage = fnUsagePage.unsignedIntValue;
-				fnModifierKeyUsage = fnUsage.unsignedIntValue;
-				IOObjectRelease (child);
-				break;
-			}
-		}
-
-		IOObjectRelease (childrenIterator);
-	}
-
-	- (void *) deviceLocationTag {
-		NSNumber *locationId = ensureNumber (IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDLocationIDKey)));
-
-		return locationId ? (void *) locationId.unsignedIntegerValue : NULL;
-	}
-
-	- (void) handleInputValue: (IOHIDValueRef) valueRef {
-		IOHIDElementRef elem = IOHIDValueGetElement (valueRef);
-		uint32_t usagePage = IOHIDElementGetUsagePage (elem);
-		uint32_t usage;
-
-		switch (usagePage) {
-			case kHIDPage_KeyboardOrKeypad:
-				usage = IOHIDElementGetUsage (elem);
-				if (!(usage >= kHIDUsage_KeyboardA && usage <= kHIDUsage_KeyboardRightGUI))
-					return; // not a key event
-				break;
-
-			case kHIDPage_Consumer:
-				usage = IOHIDElementGetUsage (elem);
-				if (!(usage == kHIDUsage_Csmr_Eject))
-					return; // not the 'Eject' key event
-				usage |= 0x100;
-				break;
-
-			default:
-				if (usagePage != fnModifierKeyUsagePage || fnModifierKeyUsagePage == kHIDPage_Undefined)
-					return; // not anything we care about
-				usage = IOHIDElementGetUsage (elem);
-				if (!(usage == fnModifierKeyUsage))
-					return; // not the Apple 'Fn' modifier key event
-				usage = kHIDUsage_AppleVendorKeyboard_Function | 0x100;
-				break;
-		}
-
-		CFIndex valueLength = IOHIDValueGetLength (valueRef);
-		if (valueLength == 0 || valueLength > 8)
-			return; // not an expected value
-
-		[deviceState handleKey: (uint16_t) usage status: IOHIDValueGetIntegerValue (valueRef) != 0];
-	}
-
-	- (void) dealloc {
-		if (busyStateNotifyPort) {
-			IOObjectRelease (busyStateNotification);
-			IONotificationPortDestroy (busyStateNotifyPort); // this releases the associated CFRunLoopSource
-		}
-		if (opened) {
-			IOHIDDeviceClose (deviceReference, kIOHIDOptionsTypeNone);
-			NSLog (@"Removed device: %@", IOHIDDeviceGetProperty (deviceReference, CFSTR (kIOHIDProductKey)));
-		}
-	}
-
-	static NSNumber *ensureNumber (CFTypeRef reference) {
-		return (reference && CFGetTypeID (reference) == CFNumberGetTypeID ())
-			? (__bridge NSNumber *) reference
-			: nil;
-	}
-
-	static void inputValueCallback (void *context, IOReturn result, void *sender, IOHIDValueRef valueRef) {
-		[(__bridge KeyboardDeviceHandler *) context handleInputValue: valueRef];
-	}
-
-	static void busyStateChangeCallback (void *context, io_service_t service, uint32_t messageType, void *messageArgument) {
-		if (messageType != kIOMessageServiceBusyStateChange)
-			return;
-
-		if ((uint32_t) messageArgument)
-			return; // busyState > 0
-
-		KeyboardDeviceHandler *handler = (__bridge KeyboardDeviceHandler *) context;
-
-		IOObjectRelease (handler->busyStateNotification);
-		IONotificationPortDestroy (handler->busyStateNotifyPort); // this releases the associated CFRunLoopSource
-		handler->busyStateNotifyPort = NULL;
-
-		[handler identifyFnModifierKey: service];
-	}
-@end
-
-
-@interface DeviceTracker : NSObject
-@end
-
-@implementation DeviceTracker {
-	IOHIDManagerRef hidManager;
-	CFMutableDictionaryRef deviceHandlerMap;
-	DeviceStateRegistry *deviceStateRegistry;
-}
-	- (instancetype) init {
-		if (self = [super init]) {
-			deviceHandlerMap = CFDictionaryCreateMutable (kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
-			if (!deviceHandlerMap)
-				return nil;
-
-			deviceStateRegistry = [DeviceStateRegistry new];
-			if (!deviceStateRegistry)
-				return nil;
-
-			hidManager = IOHIDManagerCreate (kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-			if (CFGetTypeID (hidManager) != IOHIDManagerGetTypeID ())
-				return nil;
-
-			if (![self setupMatching])
-				return nil;
-
-			IOHIDManagerRegisterDeviceMatchingCallback (hidManager, deviceAddedCallback, (__bridge void *) self);
-			IOHIDManagerRegisterDeviceRemovalCallback (hidManager, deviceRemovedCallback, (__bridge void *) self);
-
-			IOHIDManagerScheduleWithRunLoop (hidManager, CFRunLoopGetMain (), kCFRunLoopDefaultMode);
-		}
-		return self;
-	}
-
-	static NSMutableDictionary *usagePairMatchingDictionary (uint32_t usagePage, uint32_t usage) {
-		NSMutableDictionary *dictionary = [[NSMutableDictionary alloc] initWithCapacity: 2];
-		if (!dictionary)
-			return nil;
-
-		dictionary[@kIOHIDDeviceUsagePageKey] = @(usagePage);
-		dictionary[@kIOHIDDeviceUsageKey]     = @(usage);
-
-		return dictionary;
-	}
-
-	- (BOOL) setupMatching {
-		NSMutableDictionary *dictionary;
-		NSMutableArray *array = [[NSMutableArray alloc] initWithCapacity: 2];
-		if (!array)
-			return NO;
-
-		// this dictionary will match keyboard devices
-		dictionary = usagePairMatchingDictionary (kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard);
-		if (!dictionary)
-			return NO;
-
-		[array addObject: dictionary];
-
-		// this dictionary will match consumer control devices
-		dictionary = usagePairMatchingDictionary (kHIDPage_Consumer, kHIDUsage_Csmr_ConsumerControl);
-		if (!dictionary)
-			return NO;
-
-		[array addObject: dictionary];
-
-		dictionary = [[NSMutableDictionary alloc] initWithCapacity: 1];
-		if (!dictionary)
-			return NO;
-
-		dictionary[@kIOHIDDeviceUsagePairsKey] = array;
-
-		IOHIDManagerSetDeviceMatching (hidManager, (__bridge CFDictionaryRef) dictionary);
-		return YES;
-	}
-
-	- (void) dealloc {
-		if (hidManager)
-			IOHIDManagerUnscheduleFromRunLoop (hidManager, CFRunLoopGetMain (), kCFRunLoopDefaultMode);
-		if (deviceHandlerMap)
-			CFRelease (deviceHandlerMap);
-		if (hidManager)
-			CFRelease (hidManager);
-	}
-
-	static void deviceAddedCallback (void *context, IOReturn result, void *sender, IOHIDDeviceRef deviceRef) {
-		DeviceTracker *tracker = (__bridge DeviceTracker *) context;
-
-		if (CFDictionaryContainsKey (tracker->deviceHandlerMap, deviceRef))
-			return;
-
-		KeyboardDeviceHandler *handler = [[KeyboardDeviceHandler alloc]
-			initWithDeviceReference: deviceRef
-			andDeviceStateRegistry:  tracker->deviceStateRegistry
+		NSString *name = [[[NSBundle mainBundle] infoDictionary]
+			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
 		];
-		if (!handler)
-			return;
+		if (!name)
+			name = [NSProcessInfo processInfo].processName;
 
-		CFDictionarySetValue (tracker->deviceHandlerMap, deviceRef, (__bridge void *) handler);
+		return [self initWithAppName: name];
 	}
 
-	static void deviceRemovedCallback (void *context, IOReturn result, void *sender, IOHIDDeviceRef deviceRef) {
-		DeviceTracker *tracker = (__bridge DeviceTracker *) context;
+	- (instancetype) initWithAppName: (NSString *) appName {
+		if (self = [super init]) {
+			int fd = [self open: appName];
+			if (fd < 0)
+				return nil;
 
-		if (!CFDictionaryContainsKey (tracker->deviceHandlerMap, deviceRef))
-			return;
+			handle = [[NSFileHandle alloc] initWithFileDescriptor: fd closeOnDealloc: YES];
+			if (!handle) {
+				close (fd);
+				return nil;
+			}
+		}
+		return self;
+	}
 
-		CFDictionaryRemoveValue (tracker->deviceHandlerMap, deviceRef);
+	- (int) open: (NSString *) appName {
+		NSFileManager *fileManager = [NSFileManager defaultManager];
+		NSURL *url = [fileManager
+			URLForDirectory:   NSApplicationSupportDirectory
+			inDomain:          NSUserDomainMask
+			appropriateForURL: nil
+			create:            NO
+			error:             nil
+		];
+		if (!url)
+			return -1;
+
+		url = [url URLByAppendingPathComponent: appName isDirectory: YES];
+		if (!url)
+			return -1;
+
+		_url = [url URLByAppendingPathComponent: @".lockfile" isDirectory: NO];
+		if (!_url)
+			return -1;
+
+		if (![fileManager createDirectoryAtURL: url withIntermediateDirectories: YES attributes: nil error: nil])
+			return -1;
+
+		return open (_url.fileSystemRepresentation, O_RDWR|O_CREAT, 0644);
+	}
+
+	- (BOOL) lock {
+		if (_isLocked)
+			return YES;
+
+		if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB)) {
+			int pid = [self readPID];
+			NSLog (@"Another instance%@ is already running.",
+				(pid > 0) ? [NSString stringWithFormat: @" (PID %d)", pid] : @""
+			);
+			return NO;
+		}
+
+		if (![self isOwned]) {
+			NSLog (@"Lockfile ownership verification failed.");
+			return NO;
+		}
+
+		[self writePID];
+
+		return (_isLocked = YES);
+	}
+
+	- (BOOL) isOwned {
+		struct stat fsstat, fdstat;
+
+		if (stat (_url.fileSystemRepresentation, &fsstat) || fstat (handle.fileDescriptor, &fdstat))
+			return NO;
+
+		return (fsstat.st_dev == fdstat.st_dev && fsstat.st_ino == fdstat.st_ino);
+	}
+
+	- (int) readPID {
+		[handle seekToFileOffset: 0];
+		return [[NSString alloc]
+			initWithData: [handle readDataOfLength: 1024]
+			encoding: ISS_LOCKFILE_ENCODING
+		].intValue;
+	}
+
+	- (void) writePID {
+		[handle truncateFileAtOffset: 0];
+		[handle
+			writeData: [[NSString stringWithFormat: @"%d", getpid ()]
+				dataUsingEncoding: ISS_LOCKFILE_ENCODING
+			]
+		];
+		[handle synchronizeFile];
+	}
+
+	- (void) dealloc {
+		if (_isLocked && [self isOwned])
+			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
 	}
 @end
 
 
 @interface InputSourceSwitchApplication : NSApplication
-	@property (readonly) int returnValue;
-
-	+ (instancetype) sharedApplication;
+	- (int) runWithServerPortHolder: (ISSUMachPortHolder *) serverPortHolder andMonitorPID: (pid_t) monitorPID;
+	- (void) quitWithReturnValue: (int) returnValue;
 @end
 
 @implementation InputSourceSwitchApplication {
-	DeviceTracker *tracker;
-	BOOL subscribed;
+	pid_t _monitorPID;
+	ISSUMachPort *_listenPort;
+	ISSUMachPort *_sendPort;
+	BOOL _subscribed;
+	int _returnValue;
 }
-	+ (instancetype) sharedApplication {
-		return (InputSourceSwitchApplication *) [super sharedApplication];
-	}
-
-	- (instancetype) init {
-		if (self = [super init]) {
-			if (!setupSignalHandlers (handleSignalAsQuit, NO)) {
-				NSLog (@"Failed to setup signal handlers.");
-				return nil;
-			}
-		}
-		return self;
-	}
-
-	- (BOOL) createTracker {
-		tracker = [DeviceTracker new];
-		if (!tracker) {
-			NSLog (@"Failed to create DeviceTracker.");
-			return NO;
-		}
-		return YES;
-	}
-
-	- (void) recreateTracker {
-		if (!tracker) {
-			if (![self createTracker]) {
-				_returnValue = 3;
-				[self quitWithData: 0];
-			}
-		}
-	}
-
-	- (void) destroyTracker {
-		if (tracker)
-			tracker = nil;
-	}
-
 	- (void) receiveDectivationNote: (NSNotification *) note {
-		if (subscribed) {
+		if (_subscribed) {
 			NSLog (@"Received dectivation notfication: %@", [note name]);
-			[self destroyTracker];
+			[self sendMonitorCommand: ISS_CMD_DEACTIVATE_MONITOR];
 		}
 	}
 
 	- (void) receiveActivationNote: (NSNotification *) note {
-		if (subscribed) {
+		if (_subscribed) {
 			NSLog (@"Received activation notfication: %@", [note name]);
-			[self recreateTracker];
+			[self sendMonitorCommand: ISS_CMD_ACTIVATE_MONITOR];
 		}
 	}
 
@@ -601,11 +196,11 @@
 			subscribeToNotification: NSWorkspaceSessionDidBecomeActiveNotification
 			withSelector:            @selector (receiveActivationNote:)
 		];
-		subscribed = YES;
+		_subscribed = YES;
 	}
 
 	- (void) unsubscribeFromNotifications {
-		subscribed = NO;
+		_subscribed = NO;
 		[self unsubscribeFromNotification: NSWorkspaceWillSleepNotification];
 		[self unsubscribeFromNotification: NSWorkspaceDidWakeNotification];
 		[self unsubscribeFromNotification: NSWorkspaceSessionDidResignActiveNotification];
@@ -625,31 +220,57 @@
 					dequeue:               YES
 				];
 
-				if (event.type == NSApplicationDefined && event.subtype == QuitEventSubType)
+				if (event.type == NSApplicationDefined && event.subtype == ISS_QUIT_EVENT_SUBTYPE) {
+					_returnValue = event.data1;
 					_running = NO;
-				else
+				} else
 					[self sendEvent: event];
 			}
 		} while (_running);
 	}
 
 	- (void) run {
-		if (_returnValue)
-			return;
+		_returnValue = 0;
 
 		[self subscribeToNotifications];
 
-		if (isSessionActive () && ![self createTracker])
-			_returnValue = 2;
-		else
+		@try {
 			[self runLoop];
-
-		[self unsubscribeFromNotifications];
-
-		[self destroyTracker];
+		} @finally {
+			[self unsubscribeFromNotifications];
+		}
 	}
 
-	- (void) quitWithData: (int) data {
+	- (int) runWithServerPortHolder: (ISSUMachPortHolder *) serverPortHolder andMonitorPID: (pid_t) monitorPID {
+		@try {
+			_monitorPID = monitorPID;
+			_listenPort = [serverPortHolder get];
+
+			[_listenPort setMessageCallBack: &portExchangeHandler andInfo: (__bridge void *) self];
+
+			if (![_listenPort scheduleInRunLoop: CFRunLoopGetMain () forMode: kCFRunLoopDefaultMode]) {
+				NSLog (@"Failed to schedule server mach port.");
+				_returnValue = 2;
+			} else
+				[self run];
+
+			return _returnValue;
+		} @finally {
+			_monitorPID = 0;
+			_listenPort = nil;
+			_sendPort = nil;
+		}
+	}
+
+	- (void) sendMonitorCommand: (int) command {
+		if (_sendPort)
+			if (!ISSUCommandSend (_sendPort, command)) {
+				NSLog (@"Failed to send monitor command.");
+				[self quitWithReturnValue: 3];
+			}
+	}
+
+	- (void) quitWithReturnValue: (int) returnValue {
 		[self
 			postEvent: [NSEvent
 				otherEventWithType: NSApplicationDefined
@@ -658,51 +279,15 @@
 				timestamp:          [NSProcessInfo processInfo].systemUptime
 				windowNumber:       0
 				context:            nil
-				subtype:            QuitEventSubType
-				data1:              data
+				subtype:            ISS_QUIT_EVENT_SUBTYPE
+				data1:              returnValue
 				data2:              0
 			]
 			atStart: YES
 		];
 	}
 
-	- (void) dealloc {
-		setupSignalHandlers (SIG_DFL, NO);
-	}
-
-	static void handleSignalAsQuit (int signum) {
-		[NSApp quitWithData: signum];
-	}
-
-	static BOOL maskSignals (int how) {
-		sigset_t set;
-
-		sigemptyset (&set);
-		sigaddset (&set, SIGTERM);
-		sigaddset (&set, SIGINT);
-
-		return !sigprocmask (how, &set, NULL);
-	}
-
-	static BOOL setupSignalHandler (int signal, void (*handler) (int signum), BOOL restart) {
-		struct sigaction action;
-
-		memset (&action, 0, sizeof (action));
-		action.sa_handler = handler;
-		if (restart)
-			action.sa_flags = SA_RESTART;
-
-		return !sigaction (signal, &action, NULL);
-	}
-
-	static BOOL setupSignalHandlers (void (*handler) (int signum), BOOL restart) {
-		return
-			setupSignalHandler (SIGTERM, handler, restart)
-			&&
-			setupSignalHandler (SIGINT, handler, restart);
-	}
-
-	static BOOL isSessionActive () {
+	static BOOL isSessionActive (void) {
 		NSDictionary *sessionInfo = (__bridge_transfer NSDictionary *) CGSessionCopyCurrentDictionary ();
 		if (!sessionInfo)
 			return NO;
@@ -716,350 +301,279 @@
 			&&
 			CFBooleanGetValue (isActiveValueRef);
 	}
-@end
 
+	static void portExchangeHandler (ISSUMachPort *port, mach_msg_header_t *msg, void *info) {
+		InputSourceSwitchApplication *instance = (__bridge InputSourceSwitchApplication *) info;
+		ISSUMachPort *listenPort, *sendPort;
+		mach_port_t machPort;
+		BOOL ignore;
 
-@interface LockFile : NSObject
-	@property (readonly) NSURL *url;
-	@property (readonly) BOOL isLocked;
+		if (instance->_monitorPID > 0) {
+			audit_token_t *auditToken;
 
-	- (instancetype) initWithAppName: (NSString *) appName;
-	- (BOOL) ensureLocked;
-	- (BOOL) handDown;
-@end
+			if (ISSUGetAuditToken (msg, &auditToken)) {
+				pid_t pid = audit_token_to_pid (*auditToken);
+				if ((ignore = (pid != instance->_monitorPID)))
+					NSLog (@"Ignoring message from unauthorized process PID: %d", pid);
+			} else {
+				ignore = YES;
+				NSLog (@"Ignoring message without audit token.");
+			}
+		} else
+			ignore = NO;
 
-@implementation LockFile {
-	NSFileHandle *handle;
-}
-	- (instancetype) init {
-		if (fcntl (LOCKFILE_FD, F_GETFD) != -1) {
-			// we've inherited a lockfile
-			int fd = dup (LOCKFILE_FD);
-
-			close (LOCKFILE_FD);
-
-			return [self initWithFd: fd];
+		if (!ISSUPortRightsReceive (msg, &machPort, 1)) {
+			if (ignore)
+				return;
+			NSLog (@"Failed to receive mach port rights.");
+			goto error_exit;
 		}
 
-		// we need to create our own lockfile
-		NSString *name = [[[NSBundle mainBundle] infoDictionary]
-			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
-		];
-		if (!name)
-			name = [NSProcessInfo processInfo].processName;
-
-		return [self initWithAppName: name];
-	}
-
-	- (instancetype) initWithFd: (int) fd {
-		if (!(self = [super init]))
-			return nil;
-
-		return [self finishInit: fd];
-	}
-
-	- (instancetype) initWithAppName: (NSString *) appName {
-		if (!(self = [super init]))
-			return nil;
-
-		return [self finishInit: [self open: appName]];
-	}
-
-	- (instancetype) __attribute__ ((objc_method_family (init))) finishInit: (int) fd {
-		if (fd == -1)
-			return nil;
-
-		handle = [[NSFileHandle alloc] initWithFileDescriptor: fd closeOnDealloc: YES];
-		if (!handle) {
-			close (fd);
-			return nil;
+		if (!(sendPort = [[ISSUMachPort alloc] initWithMachPort: machPort])) {
+			if (ignore)
+				return;
+			NSLog (@"Failed to create send mach port.");
+			goto error_exit;
 		}
 
-		return self;
-	}
-
-	- (int) open: (NSString *) appName {
-		NSFileManager *fileManager = [NSFileManager defaultManager];
-		NSURL *url = [fileManager
-			URLForDirectory:   NSApplicationSupportDirectory
-			inDomain:          NSUserDomainMask
-			appropriateForURL: nil
-			create:            NO
-			error:             nil
-		];
-		if (!url)
-			return -1;
-
-		url = [url URLByAppendingPathComponent: appName isDirectory: YES];
-		_url = [url URLByAppendingPathComponent: @".lockfile" isDirectory: NO];
-
-		if (![fileManager createDirectoryAtURL: url withIntermediateDirectories: YES attributes: nil error: nil])
-			return -1;
-
-		return open (_url.fileSystemRepresentation, O_RDWR|O_CREAT, 0644);
-	}
-
-	- (BOOL) ensureLocked {
-		if (_isLocked)
-			return YES;
-
-		if (_url) {
-			if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB)) {
-				logAnotherInstance ([self readPid]);
-				return NO;
-			}
-
-			if (![self isOwned]) {
-				NSLog (@"Lockfile ownership verification failed.");
-				return NO;
-			}
-
-			[self writePid];
-		} else {
-			int pid = [self readPid];
-
-			if (flock (handle.fileDescriptor, LOCK_EX|LOCK_NB) || pid != getppid ()) {
-				logAnotherInstance (pid);
-				return NO;
-			}
+		if (ignore) {
+			ISSUCommandSend (sendPort, 0);
+			return;
 		}
 
-		return (_isLocked = YES);
+		instance->_sendPort = sendPort;
+
+		// now replace the listen port which is registered with the bootstrap
+		// server (the "server port") with an anonymous one (the "listen port")
+
+		if (!(listenPort = [ISSUMachPort new])) {
+			NSLog (@"Failed to create listen mach port.");
+			goto error_exit;
+		}
+
+		[listenPort setMessageCallBack: &monitorEventHandler andInfo: info];
+
+		if (![listenPort scheduleInRunLoop: CFRunLoopGetMain () forMode: kCFRunLoopDefaultMode]) {
+			NSLog (@"Failed to schedule listen mach port.");
+			goto error_exit;
+		}
+
+		machPort = listenPort.machPort;
+
+		// send the new listen port to the monitor process
+		if (!ISSUPortRightsSend (instance->_sendPort, &machPort, 1)) {
+			NSLog (@"Failed to send mach port rights.");
+			goto error_exit;
+		}
+
+		if (isSessionActive ())
+			[instance sendMonitorCommand: ISS_CMD_ACTIVATE_MONITOR];
+
+		instance->_listenPort = listenPort;
+
+		return;
+
+	error_exit:
+		[instance quitWithReturnValue: 3];
 	}
 
-	- (BOOL) isOwned {
-		struct stat fsstat, fdstat;
+	static void monitorEventHandler (ISSUMachPort *port, mach_msg_header_t *msg, void *info) {
+		InputSourceSwitchApplication *instance = (__bridge InputSourceSwitchApplication *) info;
+		int command;
 
-		if (stat (_url.fileSystemRepresentation, &fsstat) || fstat (handle.fileDescriptor, &fdstat))
-			return NO;
+		if (!ISSUCommandReceive (msg, &command)) {
+			NSLog (@"Invalid message received.");
+			goto error_exit;
+		}
 
-		return (fsstat.st_dev == fdstat.st_dev && fsstat.st_ino == fdstat.st_ino);
+		switch (command) {
+			case ISS_CMD_PERFORM_SWITCH:
+				switchInputSource ();
+				break;
+			default:
+				NSLog (@"Invalid command received: %d", command);
+				goto error_exit;
+		}
+		return;
+
+	error_exit:
+		[instance quitWithReturnValue: 3];
 	}
 
-	- (int) readPid {
-		[handle seekToFileOffset: 0];
-		return [[NSString alloc]
-			initWithData: [handle readDataOfLength: 1024]
-			encoding: LOCKFILE_ENCODING
-		].intValue;
-	}
-
-	- (void) writePid {
-		[handle truncateFileAtOffset: 0];
-		[handle
-			writeData: [[NSString stringWithFormat: @"%d", getpid ()]
-				dataUsingEncoding: LOCKFILE_ENCODING
-			]
-		];
-		[handle synchronizeFile];
-	}
-
-	- (BOOL) handDown {
-		// release _url so that the lockfile is not removed on dealloc
-		_url = nil;
-
-		int fd = dup2 (handle.fileDescriptor, LOCKFILE_FD);
-
-		// release handle so that the original fd is closed
-		handle = nil;
-
-		return (fd != -1);
-	}
-
-	- (void) dealloc {
-		if (_isLocked && [self isOwned])
-			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
-	}
-
-	static void logAnotherInstance (int pid) {
-		NSLog (@"Another instance%@ is already running.",
-			(pid > 0) ? [NSString stringWithFormat: @" (with PID %d)", pid] : @""
+	static void switchInputSource (void) {
+		NSArray *inputSources = (__bridge_transfer NSArray *) TISCreateInputSourceList (
+			(__bridge CFDictionaryRef) @{
+				(__bridge NSString *) kTISPropertyInputSourceCategory:
+					(__bridge NSString *) kTISCategoryKeyboardInputSource,
+				(__bridge NSString *) kTISPropertyInputSourceIsEnabled:       @YES,
+				(__bridge NSString *) kTISPropertyInputSourceIsSelectCapable: @YES
+			},
+			NO
 		);
-	}
 
-	static uid_t giveupSuidPrivileges () {
-		uid_t ruid = getuid ();
-		uid_t euid = geteuid ();
+		if ([inputSources count] < 2)
+			return; // no point to switch if less than two sources are available
 
-		if (ruid != euid)
-			seteuid (ruid);
-		else
-			euid = -1;
+		[inputSources enumerateObjectsUsingBlock: ^ (id element, NSUInteger idx, BOOL *stop) {
+			TISInputSourceRef inputSource = (__bridge TISInputSourceRef) element;
+			CFTypeRef isSelectedValueRef = (CFTypeRef) TISGetInputSourceProperty (
+				inputSource,
+				kTISPropertyInputSourceIsSelected
+			);
 
-		return euid;
-	}
+			if (
+				isSelectedValueRef
+				&&
+				CFGetTypeID (isSelectedValueRef) == CFBooleanGetTypeID ()
+				&&
+				CFBooleanGetValue (isSelectedValueRef)
+			) {
+				inputSource = (__bridge TISInputSourceRef) inputSources[(idx + 1) % [inputSources count]];
 
-	static gid_t giveupSgidPrivileges () {
-		gid_t rgid = getgid ();
-		gid_t egid = getegid ();
+				TISSelectInputSource (inputSource);
 
-		if (rgid != egid)
-			setegid (rgid);
-		else
-			egid = -1;
-
-		return egid;
-	}
-
-	static uid_t assumeSuidIdentity () {
-		uid_t ruid = getuid ();
-		uid_t euid = geteuid ();
-
-		if (ruid != euid)
-			setuid (euid);
-		else
-			ruid = -1;
-
-		return ruid;
-	}
-
-	static gid_t assumeSgidIdentity () {
-		gid_t rgid = getgid ();
-		gid_t egid = getegid ();
-
-		if (rgid != egid)
-			setgid (egid);
-		else
-			rgid = -1;
-
-		return rgid;
-	}
-
-	static void restoreSuidPrivileges (uid_t suid) {
-		if (suid != -1)
-			seteuid (suid);
-	}
-
-	static void restoreSgidPrivileges (gid_t sgid) {
-		if (sgid != -1)
-			setegid (sgid);
-	}
-
-	static NSObject *runUnprivileged (NSObject *(^block) ()) {
-		uid_t suid = giveupSuidPrivileges ();
-		gid_t sgid = giveupSgidPrivileges ();
-
-		@try {
-			return block ();
-		} @finally {
-			restoreSuidPrivileges (suid);
-			restoreSgidPrivileges (sgid);
-		}
+				*stop = YES;
+			}
+		}];
 	}
 @end
 
 
-static pid_t slave;
-
-
-static void forwardSignal (int signum) {
-	kill (slave, signum);
+static void handleSignalAsQuit (void *info) {
+	[NSApp quitWithReturnValue: 0];
 }
+
+static void handleChildDeath (void *info) {
+	int status;
+
+	// reap the child
+	if (waitpid (-1, &status, WNOHANG) > 0) {
+		if (WIFEXITED (status)) {
+			int exitStatus = WEXITSTATUS (status);
+			if (exitStatus)
+				NSLog (@"Monitor process exited unexpectedly with exit status: %d", exitStatus);
+			else
+				NSLog (@"Monitor process exited unexpectedly.");
+		} else if (WIFSIGNALED (status)) {
+			int signum = WTERMSIG (status);
+			NSLog (@"Monitor process was terminated unexpectedly by signal: %d (SIG%@)", signum, [@(sys_signame[signum]) uppercaseString]);
+		}
+	} else
+		NSLog (@"Failed to get the monitor process exit status.");
+
+	[NSApp quitWithReturnValue: 3];
+}
+
+static ISSUSignalHandlerTableEntry signalHandlerTable[] = {
+	{SIGTERM, &handleSignalAsQuit},
+	{SIGINT,  &handleSignalAsQuit},
+	{SIGCHLD, &handleChildDeath}
+};
+
+static NSURL *getMonitorExecutableURL (char *argv0) {
+	NSURL *url = ISSUGetAbsoluteFileURL (argv0);
+	if (!url)
+		return nil;
+
+	url = [url URLByDeletingLastPathComponent];
+	if (!url)
+		return nil;
+
+	return [NSURL
+		fileURLWithFileSystemRepresentation: ISS_MONITOR_EXECUTABLE
+		isDirectory:                         NO
+		relativeToURL:                       url
+	];
+}
+
+static ISSUMachPortHolder *createServerPort (void) {
+	NSString *name = ISSUGetPerProcessName (ISS_SERVER_PORT_NAME, getpid ());
+	if (!name)
+		return nil;
+
+	ISSUMachPort *port = [ISSUMachPort new];
+	if (!port)
+		return nil;
+
+	if (![port registerName: name])
+		return nil;
+
+	return [ISSUMachPortHolder holderWithPort: port];
+}
+
 
 int main (int argc, char * const argv[]) {
-	LockFile *lockFile = (LockFile *) runUnprivileged (^ {return [LockFile new];});
-	int rv;
+	LockFile *lockFile;
+	ISSUMachPortHolder *serverPortHolder;
+	pid_t pid;
 
-	if (!lockFile) {
+	if (!ISSUSetupSignalHandlers (signalHandlerTable, ISSUArrayLength (signalHandlerTable))) {
+		NSLog (@"Failed to setup signal handlers.");
+		goto error_exit;
+	}
+
+	if (!(lockFile = [LockFile new])) {
 		NSLog (@"Failed to create lockfile.");
 		goto error_exit;
 	}
-
-	if (![lockFile ensureLocked])
+	if (![lockFile lock])
 		goto error_exit;
 
-	if (!issetugid ()) {
-		// not running as issetugid - we can do our job
-		InputSourceSwitchApplication *app = [InputSourceSwitchApplication sharedApplication];
-		if (!app)
+	{
+		NSURL *monitorExecutableURL = getMonitorExecutableURL (argv[0]);
+		if (!monitorExecutableURL) {
+			NSLog (@"Failed to build monitor executable path.");
 			goto error_exit;
+		}
+		if (access (monitorExecutableURL.fileSystemRepresentation, X_OK) != 0) {
+			NSLog (@"Monitor executable not present/executable: %s", monitorExecutableURL.fileSystemRepresentation);
+			goto error_exit;
+		}
 
-		[app run];
+		// if the creation of the bootstrap subset (a private namespace for port
+		// registrations) is successfull we don't need to verify the identity of
+		// the monitor process when it checks in as no other process can obtain
+		// ports registered in the subset
+		BOOL privateBootstrapNamespace = ISSUCreateBoostrapSubset (NULL);
 
-		NSApp = nil; // release the global reference to the app
-		rv = app.returnValue;
-		goto normal_exit;
+		if (!(serverPortHolder = createServerPort ())) {
+			NSLog (@"Failed to create server mach port.");
+			goto error_exit;
+		}
+
+		switch (pid = fork ()) {
+			case -1: { // error
+				NSLog (@"Failed to fork: %s", strerror (errno));
+				goto error_exit;
+			}
+			case 0: { // child / monitor
+				char *monitorCmd[] = {(char *) monitorExecutableURL.fileSystemRepresentation, NULL};
+
+				// start the monitor process
+				execvp (*monitorCmd, monitorCmd);
+
+				_exit (ISS_ERROR_EXIT_CODE);
+			}
+		}
+
+		// we negate the PID if the server port is registered in a private bootstrap
+		// namespace
+		// the negative PID causes the InputSourceSwitchApplication to skip the
+		// verification of the identity of the monitor process
+		if (privateBootstrapNamespace)
+			pid = -pid;
 	}
 
-	if (!maskSignals (SIG_BLOCK)) {
-		NSLog (@"Failed to block signals: %s", strerror (errno));
+	// parent / switch application
+	[InputSourceSwitchApplication sharedApplication];
+	if (!NSApp)
 		goto error_exit;
-	}
 
-	switch (slave = fork ()) {
-		case -1: { // error
-			NSLog (@"Failed to fork: %s", strerror (errno));
-			goto error_exit;
-		}
-		case 0: { // child/slave
-			if (!maskSignals (SIG_UNBLOCK)) {
-				NSLog (@"Failed to unblock signals: %s", strerror (errno));
-				_exit (SLAVE_EXIT_CODE);
-			}
+	int rv = [NSApp runWithServerPortHolder: serverPortHolder andMonitorPID: pid];
 
-			if (![lockFile handDown]) {
-				NSLog (@"Failed to hand down lockfile.");
-				_exit (SLAVE_EXIT_CODE);
-			}
-
-			// get rid of the issetugid stigma
-			assumeSuidIdentity ();
-			assumeSgidIdentity ();
-
-			// restart so that issetugid () returns false
-			execvp (*argv, argv);
-
-			NSLog (@"Failed to exec slave: %s", strerror (errno));
-			_exit (SLAVE_EXIT_CODE);
-		}
-		default: { // parent/master
-			if (!setupSignalHandlers (forwardSignal, YES)) {
-				kill (slave, SIGTERM);
-				NSLog (@"Failed to setup signal handlers: %s", strerror (errno));
-				goto error_exit;
-			}
-			if (!maskSignals (SIG_UNBLOCK)) {
-				kill (slave, SIGTERM);
-				NSLog (@"Failed to unblock signals: %s", strerror (errno));
-				goto error_exit;
-			}
-
-			int status;
-			rv = waitpid (slave, &status, 0);
-
-			setupSignalHandlers (SIG_DFL, NO);
-
-			if (rv == -1) {
-				kill (slave, SIGTERM);
-				NSLog (@"Failed to wait for slave: %s", strerror (errno));
-				goto error_exit;
-			}
-
-			if (WIFEXITED (status)) {
-				rv = WEXITSTATUS (status);
-				goto normal_exit;
-			}
-
-			if (WIFSIGNALED (status)) {
-				int signum = WTERMSIG (status);
-				NSLog (@"Slave was terminated by signal: %d (SIG%@)", signum, [@(sys_signame[signum]) uppercaseString]);
-				goto error_exit;
-			}
-
-			NSLog (@"Slave terminated with unexpected status: 0x%08x", status);
-			goto error_exit;
-		}
-	}
+	NSApp = nil; // release the global application instance
+	return rv;
 
 error_exit:
-	rv = 2;
-
-normal_exit:
-	lockFile = nil;
-
-	// give up privileges before exiting
-	giveupSuidPrivileges ();
-	giveupSgidPrivileges ();
-
-	return rv;
+	return 2;
 }

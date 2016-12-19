@@ -1,18 +1,23 @@
 #### User Configurable Variables ###############################################
 
-APPNAME=$(SRCNAME)
-#APPNAME=$(DISPLAYNAME)
-DISPLAYNAME=Input Source Switch
+APPNAME=Input Source Switch
+SWITCHERBIN=$(SWITCHER_SRCNAME)
+MONITORBIN=$(MONITOR_SRCNAME)
+DISPLAYNAME=$(APPNAME)
 BUNDLEID=net.mruza.InputSourceSwitch
 
 TARGETDIR=$(DEFAULT_TARGETDIR)
 
 #### End Of User Configurable Variables ########################################
 
-CFLAGS+=-O3 -fobjc-arc
-LDLIBS=-framework AppKit -framework IOKit -framework Carbon
+# note the -emit-llvm flag allows for elimination of unused code (functions) during linking
+CFLAGS+=-O3 -fobjc-arc -emit-llvm -DISS_MONITOR_EXECUTABLE=$(call shellquote,$(call cquote,$(MONITORBIN))) -DISS_SERVER_PORT_NAME=$(call shellquote,$(call cquote,$(BUNDLEID).port))
+SWITCHER_LDLIBS=-framework AppKit -framework Carbon -lbsm
+MONITOR_LDLIBS=-framework Foundation -framework IOKit
 
-override SRCNAME=InputSourceSwitch
+override UTILS_SRCNAME=ISSUtils
+override SWITCHER_SRCNAME=InputSourceSwitch
+override MONITOR_SRCNAME=KeyboardMonitor
 override DEFAULT_TARGETDIR=installroot
 
 BUNDLEDIR=$(TARGETDIR)/Applications/$(APPNAME).app
@@ -20,13 +25,18 @@ BUNDLECONTENTSDIR=$(BUNDLEDIR)/Contents
 BUNDLEEXEDIR=$(BUNDLECONTENTSDIR)/MacOS
 AGENTDIR=$(TARGETDIR)/Library/LaunchAgents
 
-OBJFILE=$(SRCNAME).o
-EXEFILE=$(APPNAME)
 INFOFILE=Info.plist
 INFOFILETEMPLATE=$(INFOFILE).template
 AGENTFILE=$(APPNAME).plist
-AGENTFILETEMPLATE=$(SRCNAME).plist.template
+AGENTFILETEMPLATE=$(SWITCHER_SRCNAME).plist.template
 
+UTILS_OBJFILE=$(UTILS_SRCNAME).o
+
+SWITCHER_OBJFILE=$(SWITCHER_SRCNAME).o
+SWITCHER_EXEFILE=$(SWITCHERBIN)
+
+MONITOR_OBJFILE=$(MONITOR_SRCNAME).o
+MONITOR_EXEFILE=$(MONITORBIN)
 
 include Makefile.inc
 
@@ -42,76 +52,89 @@ M_BUNDLECONTENTSDIR:=$(call makeescape,$(BUNDLECONTENTSDIR))
 M_BUNDLEEXEDIR:=$(call makeescape,$(BUNDLEEXEDIR))
 M_AGENTDIR:=$(call makeescape,$(AGENTDIR))
 
-M_OBJFILE:=$(call makeescape,$(OBJFILE))
-M_EXEFILE:=$(call makeescape,$(EXEFILE))
 M_INFOFILE:=$(call makeescape,$(INFOFILE))
 M_INFOFILETEMPLATE:=$(call makeescape,$(INFOFILETEMPLATE))
 M_AGENTFILE:=$(call makeescape,$(AGENTFILE))
 M_AGENTFILETEMPLATE:=$(call makeescape,$(AGENTFILETEMPLATE))
 
+M_UTILS_OBJFILE:=$(call makeescape,$(UTILS_OBJFILE))
+
+M_SWITCHER_OBJFILE:=$(call makeescape,$(SWITCHER_OBJFILE))
+M_SWITCHER_EXEFILE:=$(call makeescape,$(SWITCHER_EXEFILE))
+
+M_MONITOR_OBJFILE:=$(call makeescape,$(MONITOR_OBJFILE))
+M_MONITOR_EXEFILE:=$(call makeescape,$(MONITOR_EXEFILE))
 
 
-all: $(M_EXEFILE)
+all: $(M_SWITCHER_EXEFILE) $(M_MONITOR_EXEFILE)
 
-$(M_OBJFILE): $(call makeescape,$(SRCNAME).m) $(call makeescape,$(SRCNAME).h) Makefile
+$(M_UTILS_OBJFILE): $(call makeescape,$(UTILS_SRCNAME).m) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
 
-$(M_EXEFILE): $(M_OBJFILE)
-	$(LINK.o) $(QUOTED.<) $(LDLIBS) $(OUTPUT_OPTION)
+$(M_SWITCHER_OBJFILE): $(call makeescape,$(SWITCHER_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
+
+$(M_MONITOR_OBJFILE): $(call makeescape,$(MONITOR_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
+
+$(M_SWITCHER_EXEFILE): $(M_SWITCHER_OBJFILE) $(M_UTILS_OBJFILE)
+	$(LINK.o) $(QUOTED.^) $(SWITCHER_LDLIBS) $(OUTPUT_OPTION)
+
+$(M_MONITOR_EXEFILE): $(M_MONITOR_OBJFILE) $(M_UTILS_OBJFILE)
+	$(LINK.o) $(QUOTED.^) $(MONITOR_LDLIBS) $(OUTPUT_OPTION)
 
 $(M_TARGETDIR):
-	T=$(QUOTED.@); \
-	install -d "$$T"
+	install -d $(QUOTED.@)
 
-$(M_BUNDLEDIR) $(M_AGENTDIR): $(M_TARGETDIR)
-	T=$(QUOTED.@); \
-	[ -d "$$T" ] && touch "$$T" || install -d -m 755 "$$T"
+$(M_BUNDLEDIR): | $(M_TARGETDIR)
+	install -d -m 755 $(QUOTED.@)
 
-$(M_BUNDLECONTENTSDIR): $(M_BUNDLEDIR)
-	T=$(QUOTED.@); \
-	[ -d "$$T" ] && touch "$$T" || install -d -m 755 "$$T"
+$(M_AGENTDIR): | $(M_TARGETDIR)
+	install -d $(QUOTED.@)
 
-$(M_BUNDLEEXEDIR): $(M_BUNDLECONTENTSDIR)
-	T=$(QUOTED.@); \
-	[ -d "$$T" ] && touch "$$T" || install -d -m 755 "$$T"
+$(M_BUNDLECONTENTSDIR): | $(M_BUNDLEDIR)
+	install -d -m 755 $(QUOTED.@)
 
-$(M_BUNDLECONTENTSDIR)/$(M_INFOFILE): $(M_INFOFILETEMPLATE) $(M_BUNDLECONTENTSDIR) Makefile
-	T=$(QUOTED.@); S=$(QUOTED.<); \
-	install -m 644 "$$S" "$$T"
-	TA=$(call shellquote,$(call absolutepath,$@)); \
-	defaults write "$$TA" CFBundleDisplayName -string $(call shellquote,$(DISPLAYNAME)); \
-	defaults write "$$TA" CFBundleExecutable -string $(call shellquote,$(EXEFILE)); \
-	defaults write "$$TA" CFBundleIdentifier -string $(call shellquote,$(BUNDLEID)); \
-	plutil -convert xml1 "$$TA"
+$(M_BUNDLEEXEDIR): | $(M_BUNDLECONTENTSDIR)
+	install -d -m 755 $(QUOTED.@)
 
-$(M_BUNDLEEXEDIR)/$(M_EXEFILE): $(M_EXEFILE) $(M_BUNDLEEXEDIR)
-	T=$(QUOTED.@); S=$(QUOTED.<); \
-	install -m 755 -s "$$S" "$$T"
+$(M_BUNDLECONTENTSDIR)/$(M_INFOFILE): $(M_INFOFILETEMPLATE) Makefile | $(M_BUNDLECONTENTSDIR)
+	install -m 644 $(QUOTED.<) $(QUOTED.@)
+	PROPS=$(call shellquote,$(call absolutepath,$@)); \
+	defaults write "$$PROPS" CFBundleDisplayName -string $(call shellquote,$(DISPLAYNAME)); \
+	defaults write "$$PROPS" CFBundleExecutable -string $(call shellquote,$(SWITCHER_EXEFILE)); \
+	defaults write "$$PROPS" CFBundleIdentifier -string $(call shellquote,$(BUNDLEID)); \
+	plutil -convert xml1 "$$PROPS"
 
-$(M_AGENTDIR)/$(M_AGENTFILE): $(M_AGENTFILETEMPLATE) $(M_AGENTDIR) Makefile
-	T=$(QUOTED.@); S=$(QUOTED.<); \
-	install -m 644 "$$S" "$$T"
-	TA=$(call shellquote,$(call absolutepath,$@)); \
-	defaults write "$$TA" Label -string $(call shellquote,$(APPNAME)); \
-	defaults write "$$TA" ProgramArguments -array $(call shellquote,$(call replacehome,$(BUNDLEEXEDIR)/$(EXEFILE))); \
-	plutil -convert xml1 "$$TA"
+$(M_BUNDLEEXEDIR)/%: %
+	install -m 755 $(QUOTED.<) $(QUOTED.@)
 
-install: $(M_BUNDLECONTENTSDIR)/$(M_INFOFILE) $(M_BUNDLEEXEDIR)/$(M_EXEFILE) $(M_AGENTDIR)/$(M_AGENTFILE)
+$(M_BUNDLEEXEDIR)/$(M_SWITCHER_EXEFILE): $(M_SWITCHER_EXEFILE) | $(M_BUNDLEEXEDIR)
+
+$(M_BUNDLEEXEDIR)/$(M_MONITOR_EXEFILE): $(M_MONITOR_EXEFILE) | $(M_BUNDLEEXEDIR)
+
+$(M_AGENTDIR)/$(M_AGENTFILE): $(M_AGENTFILETEMPLATE) Makefile | $(M_AGENTDIR)
+	install -m 644 $(QUOTED.<) $(QUOTED.@)
+	PROPS=$(call shellquote,$(call absolutepath,$@)); \
+	defaults write "$$PROPS" Label -string $(call shellquote,$(APPNAME)); \
+	defaults write "$$PROPS" ProgramArguments -array $(call shellquote,$(call replacehome,$(BUNDLEEXEDIR)/$(SWITCHER_EXEFILE))); \
+	plutil -convert xml1 "$$PROPS"
+
+install: $(M_BUNDLECONTENTSDIR)/$(M_INFOFILE) $(M_BUNDLEEXEDIR)/$(M_SWITCHER_EXEFILE) $(M_BUNDLEEXEDIR)/$(M_MONITOR_EXEFILE) $(M_AGENTDIR)/$(M_AGENTFILE)
 
 load: install
-	AF=$(call shellquote,$(AGENTDIR)/$(AGENTFILE)); \
-	launchctl load "$$AF"
+	launchctl load $(call shellquote,$(AGENTDIR)/$(AGENTFILE))
 
 unload:
-	AF=$(call shellquote,$(AGENTDIR)/$(AGENTFILE)); \
-	[ -f "$$AF" ] && launchctl unload "$$AF" || :
+	[ -f $(call shellquote,$(AGENTDIR)/$(AGENTFILE)) ] && launchctl unload $(call shellquote,$(AGENTDIR)/$(AGENTFILE)) || :
 
 uninstall: unload
 	-rm -rf $(call shellquote,$(BUNDLEDIR))
 	-rm -f $(call shellquote,$(AGENTDIR)/$(AGENTFILE))
 
 clean:
-	-rm -f $(call shellquote,$(OBJFILE))
+	-rm -f $(call shellquote,$(UTILS_OBJFILE))
+	-rm -f $(call shellquote,$(SWITCHER_OBJFILE))
+	-rm -f $(call shellquote,$(MONITOR_OBJFILE))
 
 cleanall: clean
-	-rm -f $(call shellquote,$(EXEFILE))
+	-rm -f $(call shellquote,$(SWITCHER_EXEFILE))
+	-rm -f $(call shellquote,$(MONITOR_EXEFILE))
 	-rm -rf $(call shellquote,$(DEFAULT_TARGETDIR))
