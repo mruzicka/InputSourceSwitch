@@ -2,7 +2,7 @@
 #import <AppKit/AppKit.h>
 #import <Carbon/Carbon.h>
 #import <sys/stat.h>
-#import <bsm/libbsm.h>
+#import <dlfcn.h>
 
 #import "InputSourceSwitch.h"
 
@@ -136,6 +136,36 @@
 @end
 
 
+@interface DynamicBSM : NSObject
+	- (pid_t) pidFromAuditToken: (audit_token_t *) auditToken;
+@end
+
+@implementation DynamicBSM {
+	void *_handle;
+	pid_t (*_audit_token_to_pid) (audit_token_t token);
+}
+	- (instancetype) init {
+		if (self = [super init]) {
+			if (!(_handle = dlopen ("libbsm.dylib", RTLD_GLOBAL)))
+				return nil;
+
+			if (!(_audit_token_to_pid = dlsym (_handle, "audit_token_to_pid")))
+				return nil;
+		}
+		return self;
+	}
+
+	- (pid_t) pidFromAuditToken: (audit_token_t *) auditToken {
+		return _audit_token_to_pid (*auditToken);
+	}
+
+	- (void) dealloc {
+		if (_handle)
+			dlclose (_handle);
+	}
+@end
+
+
 @interface InputSourceSwitchApplication : NSApplication
 	- (int) runWithServerPortHolder: (ISSUMachPortHolder *) serverPortHolder andMonitorPID: (pid_t) monitorPID;
 	- (void) quitWithReturnValue: (int) returnValue;
@@ -143,6 +173,7 @@
 
 @implementation InputSourceSwitchApplication {
 	pid_t _monitorPID;
+	DynamicBSM *_bsm;
 	ISSUMachPort *_listenPort;
 	ISSUMachPort *_sendPort;
 	BOOL _subscribed;
@@ -244,6 +275,11 @@
 	- (int) runWithServerPortHolder: (ISSUMachPortHolder *) serverPortHolder andMonitorPID: (pid_t) monitorPID {
 		@try {
 			_monitorPID = monitorPID;
+			if (_monitorPID > 0 && !(_bsm = [DynamicBSM new])) {
+				NSLog (@"Process identity verification required but libbsm could not be loaded.");
+				return (_returnValue = 2);
+			}
+
 			_listenPort = [serverPortHolder get];
 
 			[_listenPort setMessageCallBack: &portExchangeHandler andInfo: (__bridge void *) self];
@@ -257,6 +293,7 @@
 			return _returnValue;
 		} @finally {
 			_monitorPID = 0;
+			_bsm = nil;
 			_listenPort = nil;
 			_sendPort = nil;
 		}
@@ -312,7 +349,7 @@
 			audit_token_t *auditToken;
 
 			if (ISSUGetAuditToken (msg, &auditToken)) {
-				pid_t pid = audit_token_to_pid (*auditToken);
+				pid_t pid = [instance->_bsm pidFromAuditToken: auditToken];
 				if ((ignore = (pid != instance->_monitorPID)))
 					NSLog (@"Ignoring message from unauthorized process PID: %d", pid);
 			} else {
@@ -370,6 +407,7 @@
 			[instance sendMonitorCommand: ISS_CMD_ACTIVATE_MONITOR];
 
 		instance->_listenPort = listenPort;
+		instance->_bsm = nil; // this is not needed beyond port exchange
 
 		return;
 

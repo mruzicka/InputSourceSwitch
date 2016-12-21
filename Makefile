@@ -12,7 +12,7 @@ TARGETDIR=$(DEFAULT_TARGETDIR)
 
 # note the -emit-llvm flag allows for elimination of unused code (functions) during linking
 CFLAGS+=-O3 -fobjc-arc -emit-llvm -DISS_MONITOR_EXECUTABLE=$(call shellquote,$(call cquote,$(MONITORBIN))) -DISS_SERVER_PORT_NAME=$(call shellquote,$(call cquote,$(BUNDLEID).port))
-SWITCHER_LDLIBS=-framework AppKit -framework Carbon -lbsm
+SWITCHER_LDLIBS=-framework AppKit -framework Carbon
 MONITOR_LDLIBS=-framework Foundation -framework IOKit
 
 override UTILS_SRCNAME=ISSUtils
