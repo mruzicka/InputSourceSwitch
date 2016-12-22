@@ -374,7 +374,7 @@
 		}
 
 		if (ignore) {
-			ISSUCommandSend (sendPort, 0);
+			ISSUCommandSend (sendPort, -1);
 			return;
 		}
 

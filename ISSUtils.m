@@ -187,7 +187,7 @@
 static void ISSUNoopHandler (int signum) {
 }
 
-BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info)) {
+BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info), void *info) {
 	dispatch_source_t source = dispatch_source_create (DISPATCH_SOURCE_TYPE_SIGNAL, signum, 0, dispatch_get_main_queue ());
 	if (!source)
 		return NO;
@@ -207,6 +207,7 @@ BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info)) {
 			return NO;
 	}
 
+	dispatch_set_context (source, info);
 	dispatch_source_set_event_handler_f (source, handler);
 
 	dispatch_resume (source);
@@ -223,7 +224,11 @@ BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info)) {
 
 BOOL ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount) {
 	for (; entryCount > 0; --entryCount, ++signalHandlerTable)
-		if (!ISSUSetupSignalHandler (signalHandlerTable->signum, signalHandlerTable->handler))
+		if (!ISSUSetupSignalHandler (
+			signalHandlerTable->signum,
+			signalHandlerTable->handler,
+			(uint8_t *) NULL + signalHandlerTable->signum
+		))
 			return NO;
 
 	return YES;

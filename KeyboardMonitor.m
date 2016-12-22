@@ -134,9 +134,9 @@ KeyboardMonitorApplication *MonitorApp;
 
 	- (void) handleKey: (uint32_t) key status: (BOOL) pressed {
 		if (pressed)
-			CFSetAddValue (_pressedKeys, (void *) (NSUInteger) key);
+			CFSetAddValue (_pressedKeys, (uint8_t *) NULL + key);
 		else
-			CFSetRemoveValue (_pressedKeys, (void *) (NSUInteger) key);
+			CFSetRemoveValue (_pressedKeys, (uint8_t *) NULL + key);
 
 		switch (_switchState) {
 			case 0:
@@ -262,7 +262,7 @@ KeyboardMonitorApplication *MonitorApp;
 				(__bridge void *) self,
 				service,
 				kIOMessageServiceBusyStateChange,
-				(void *) (NSUInteger) busyState
+				(uint8_t *) NULL + busyState
 			), _busyStateNotifyPort)
 		)
 			CFRunLoopAddSource (
@@ -321,7 +321,7 @@ KeyboardMonitorApplication *MonitorApp;
 	- (void *) deviceLocationTag {
 		NSNumber *locationId = ensureNumber (IOHIDDeviceGetProperty (_deviceReference, CFSTR (kIOHIDLocationIDKey)));
 
-		return locationId ? (void *) locationId.unsignedIntegerValue : NULL;
+		return (uint8_t *) NULL + locationId.unsignedIntegerValue;
 	}
 
 	- (void) handleInputValue: (IOHIDValueRef) valueRef {
@@ -387,7 +387,7 @@ KeyboardMonitorApplication *MonitorApp;
 		if (messageType != kIOMessageServiceBusyStateChange)
 			return;
 
-		if ((uint32_t) messageArgument)
+		if ((uint32_t) (messageArgument - NULL))
 			return; // busyState > 0
 
 		KeyboardDeviceHandler *instance = (__bridge KeyboardDeviceHandler *) context;

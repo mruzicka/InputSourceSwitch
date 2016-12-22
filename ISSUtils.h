@@ -45,7 +45,7 @@ typedef void (*ISSUMachPortInvalidationCallBack) (ISSUMachPort *port, void *info
 @end
 
 
-BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info));
+BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info), void *info);
 
 BOOL ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount);
 
