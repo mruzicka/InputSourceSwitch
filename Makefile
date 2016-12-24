@@ -27,8 +27,8 @@ AGENTDIR=$(TARGETDIR)/Library/LaunchAgents
 
 INFOFILE=Info.plist
 INFOFILETEMPLATE=$(INFOFILE).template
-AGENTFILE=$(APPNAME).plist
-AGENTFILETEMPLATE=$(SWITCHER_SRCNAME).plist.template
+AGENTFILE=$(BUNDLEID).plist
+AGENTFILETEMPLATE=LaunchAgent.plist.template
 
 UTILS_OBJFILE=$(UTILS_SRCNAME).o
 
@@ -43,8 +43,10 @@ include Makefile.inc
 # if the argument is not an absolute path then prepend the current working directory to it
 absolutepath=$(shell perl -e 'use File::Spec::Functions qw(:ALL); $$_=rel2abs(shift(@ARGV)); print' $(call shellquote,$(1)))
 
-# if the argument starts with the home directory path then replace that portion of the argument with ~
-replacehome=$(shell perl -e 'use File::Spec::Functions qw(:ALL); $$_=canonpath(shift(@ARGV)); $$h=canonpath($$ENV{HOME}); file_name_is_absolute($$_) && ($$l_=length($$_)) >= ($$lh=length($$h)) && substr($$_,0,$$lh) eq $$h && ($$l_ == $$lh || substr($$_,$$lh,1) eq q(/)) and $$_=q(~).substr($$_,$$lh); print' $(call shellquote,$(1)))
+# if the argument starts with the home directory path then replace that portion of the argument
+# with '$HOME'
+# quote the resulting string appropriately so that it can be passed as a /bin/sh argument
+replacehome=$(shell perl -e 'use File::Spec::Functions qw(:ALL); $$_=canonpath(shift(@ARGV)); $$h=canonpath($$ENV{HOME}); file_name_is_absolute($$_) && ($$l_=length($$_)) >= ($$lh=length($$h)) && substr($$_,0,$$lh) eq $$h && ($$l_ == $$lh || substr($$_,$$lh,1) eq q(/)) and ($$h=q($$HOME), $$_=substr($$_,$$lh), 1) or $$h=q(); s/([\\"`\$$])/\\$$1/sg; $$_=q(").$$h.$$_.q("); print' $(call shellquote,$(1)))
 
 M_TARGETDIR:=$(call makeescape,$(TARGETDIR))
 M_BUNDLEDIR:=$(call makeescape,$(BUNDLEDIR))
@@ -114,7 +116,8 @@ $(M_AGENTDIR)/$(M_AGENTFILE): $(M_AGENTFILETEMPLATE) Makefile | $(M_AGENTDIR)
 	install -m 644 $(QUOTED.<) $(QUOTED.@)
 	PROPS=$(call shellquote,$(call absolutepath,$@)); \
 	defaults write "$$PROPS" Label -string $(call shellquote,$(APPNAME)); \
-	defaults write "$$PROPS" ProgramArguments -array $(call shellquote,$(call replacehome,$(BUNDLEEXEDIR)/$(SWITCHER_EXEFILE))); \
+	defaults write "$$PROPS" ProgramArguments -array /bin/sh -c; \
+	/usr/libexec/PlistBuddy -c $(call shellquote,Add ProgramArguments:2 string $(call shellquote,exec $(call replacehome,$(BUNDLEEXEDIR)/$(SWITCHER_EXEFILE)))) "$$PROPS"; \
 	plutil -convert xml1 "$$PROPS"
 
 install: $(M_BUNDLECONTENTSDIR)/$(M_INFOFILE) $(M_BUNDLEEXEDIR)/$(M_SWITCHER_EXEFILE) $(M_BUNDLEEXEDIR)/$(M_MONITOR_EXEFILE) $(M_AGENTDIR)/$(M_AGENTFILE)

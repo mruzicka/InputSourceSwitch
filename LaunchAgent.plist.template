@@ -5,11 +5,7 @@
 	<key>Label</key>
 	<string>@@@@</string>
 	<key>ProgramArguments</key>
-	<array>
-		<string>@@@@</string>
-	</array>
-	<key>EnableGlobbing</key>
-	<true/>
+	<array/>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>LimitLoadToSessionType</key>
