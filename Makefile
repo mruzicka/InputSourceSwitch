@@ -1,3 +1,5 @@
+override MAKEFILE:=$(lastword $(MAKEFILE_LIST))
+
 #### User Configurable Variables ###############################################
 
 APPNAME=Input Source Switch
@@ -7,6 +9,7 @@ DISPLAYNAME=$(APPNAME)
 BUNDLEID=net.mruza.InputSourceSwitch
 
 TARGETDIR=$(DEFAULT_TARGETDIR)
+SESSIONTYPE=Aqua
 
 #### End Of User Configurable Variables ########################################
 
@@ -19,11 +22,12 @@ override UTILS_SRCNAME=ISSUtils
 override SWITCHER_SRCNAME=InputSourceSwitch
 override MONITOR_SRCNAME=KeyboardMonitor
 override DEFAULT_TARGETDIR=installroot
+override VARSFILE=.$(MAKEFILE).vars
 
-BUNDLEDIR=$(TARGETDIR)/Applications/$(APPNAME).app
+BUNDLEDIR=$(if $(patsubst /%,%,$(TARGETDIR)),$(TARGETDIR))/Applications/$(APPNAME).app
 BUNDLECONTENTSDIR=$(BUNDLEDIR)/Contents
 BUNDLEEXEDIR=$(BUNDLECONTENTSDIR)/MacOS
-AGENTDIR=$(TARGETDIR)/Library/LaunchAgents
+AGENTDIR=$(if $(patsubst /%,%,$(TARGETDIR)),$(TARGETDIR))/Library/LaunchAgents
 
 INFOFILE=Info.plist
 INFOFILETEMPLATE=$(INFOFILE).template
@@ -39,14 +43,6 @@ MONITOR_OBJFILE=$(MONITOR_SRCNAME).o
 MONITOR_EXEFILE=$(MONITORBIN)
 
 include Makefile.inc
-
-# if the argument is not an absolute path then prepend the current working directory to it
-absolutepath=$(shell perl -e 'use File::Spec::Functions qw(:ALL); $$_=rel2abs(shift(@ARGV)); print' $(call shellquote,$(1)))
-
-# if the argument starts with the home directory path then replace that portion of the argument
-# with '$HOME'
-# quote the resulting string appropriately so that it can be passed as a /bin/sh argument
-replacehome=$(shell perl -e 'use File::Spec::Functions qw(:ALL); $$_=canonpath(shift(@ARGV)); $$h=canonpath($$ENV{HOME}); file_name_is_absolute($$_) && ($$l_=length($$_)) >= ($$lh=length($$h)) && substr($$_,0,$$lh) eq $$h && ($$l_ == $$lh || substr($$_,$$lh,1) eq q(/)) and ($$h=q($$HOME), $$_=substr($$_,$$lh), 1) or $$h=q(); s/([\\"`\$$])/\\$$1/sg; $$_=q(").$$h.$$_.q("); print' $(call shellquote,$(1)))
 
 M_TARGETDIR:=$(call makeescape,$(TARGETDIR))
 M_BUNDLEDIR:=$(call makeescape,$(BUNDLEDIR))
@@ -67,14 +63,23 @@ M_SWITCHER_EXEFILE:=$(call makeescape,$(SWITCHER_EXEFILE))
 M_MONITOR_OBJFILE:=$(call makeescape,$(MONITOR_OBJFILE))
 M_MONITOR_EXEFILE:=$(call makeescape,$(MONITOR_EXEFILE))
 
+VARS_CHANGED:=$(shell \
+	python -c 'import $(BUILD_UTILS); $(BUILD_UTILS).checkAndSaveMakeVariables()' \
+	$(call shellquote,$(VARSFILE)) $(call shellquote,$(MAKEFILE)) \
+	$(foreach v,$(.VARIABLES),$(call shellquote,$v) $(call shellquote,$($v))) \
+)
 
-all: $(M_SWITCHER_EXEFILE) $(M_MONITOR_EXEFILE)
 
-$(M_UTILS_OBJFILE): $(call makeescape,$(UTILS_SRCNAME).m) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
+.PHONY: all load unload install uninstall clean cleanall $(if $(VARS_CHANGED),$(MAKEFILE))
 
-$(M_SWITCHER_OBJFILE): $(call makeescape,$(SWITCHER_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
 
-$(M_MONITOR_OBJFILE): $(call makeescape,$(MONITOR_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) Makefile
+all: $(M_SWITCHER_EXEFILE) $(M_MONITOR_EXEFILE) |
+
+$(M_UTILS_OBJFILE): $(call makeescape,$(UTILS_SRCNAME).m) $(call makeescape,$(UTILS_SRCNAME).h) $(MAKEFILE)
+
+$(M_SWITCHER_OBJFILE): $(call makeescape,$(SWITCHER_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) $(MAKEFILE)
+
+$(M_MONITOR_OBJFILE): $(call makeescape,$(MONITOR_SRCNAME).m) $(call makeescape,$(SWITCHER_SRCNAME).h) $(call makeescape,$(UTILS_SRCNAME).h) $(MAKEFILE)
 
 $(M_SWITCHER_EXEFILE): $(M_SWITCHER_OBJFILE) $(M_UTILS_OBJFILE)
 	$(LINK.o) $(QUOTED.^) $(SWITCHER_LDLIBS) $(OUTPUT_OPTION)
@@ -97,28 +102,27 @@ $(M_BUNDLECONTENTSDIR): | $(M_BUNDLEDIR)
 $(M_BUNDLEEXEDIR): | $(M_BUNDLECONTENTSDIR)
 	install -d -m 755 $(QUOTED.@)
 
-$(M_BUNDLECONTENTSDIR)/$(M_INFOFILE): $(M_INFOFILETEMPLATE) Makefile | $(M_BUNDLECONTENTSDIR)
-	install -m 644 $(QUOTED.<) $(QUOTED.@)
-	PROPS=$(call shellquote,$(call absolutepath,$@)); \
-	defaults write "$$PROPS" CFBundleDisplayName -string $(call shellquote,$(DISPLAYNAME)); \
-	defaults write "$$PROPS" CFBundleExecutable -string $(call shellquote,$(SWITCHER_EXEFILE)); \
-	defaults write "$$PROPS" CFBundleIdentifier -string $(call shellquote,$(BUNDLEID)); \
-	plutil -convert xml1 "$$PROPS"
-
-$(M_BUNDLEEXEDIR)/%: %
-	install -m 755 $(QUOTED.<) $(QUOTED.@)
+$(M_BUNDLECONTENTSDIR)/$(M_INFOFILE): $(M_INFOFILETEMPLATE) $(MAKEFILE) | $(M_BUNDLECONTENTSDIR)
+	install -M -m 644 /dev/null $(QUOTED.@)
+	python -c 'import $(BUILD_UTILS); $(BUILD_UTILS).processPList()' $(QUOTED.<) \
+	CFBundleDisplayName $(call shellquote,$(call cquote,$(DISPLAYNAME))) \
+	CFBundleExecutable  $(call shellquote,$(call cquote,$(SWITCHER_EXEFILE))) \
+	CFBundleIdentifier  $(call shellquote,$(call cquote,$(BUNDLEID))) \
+	> $(QUOTED.@)
 
 $(M_BUNDLEEXEDIR)/$(M_SWITCHER_EXEFILE): $(M_SWITCHER_EXEFILE) | $(M_BUNDLEEXEDIR)
+	install -m 755 $(QUOTED.<) $(QUOTED.@)
 
 $(M_BUNDLEEXEDIR)/$(M_MONITOR_EXEFILE): $(M_MONITOR_EXEFILE) | $(M_BUNDLEEXEDIR)
+	install -m 755 $(QUOTED.<) $(QUOTED.@)
 
-$(M_AGENTDIR)/$(M_AGENTFILE): $(M_AGENTFILETEMPLATE) Makefile | $(M_AGENTDIR)
-	install -m 644 $(QUOTED.<) $(QUOTED.@)
-	PROPS=$(call shellquote,$(call absolutepath,$@)); \
-	defaults write "$$PROPS" Label -string $(call shellquote,$(APPNAME)); \
-	defaults write "$$PROPS" ProgramArguments -array /bin/sh -c; \
-	/usr/libexec/PlistBuddy -c $(call shellquote,Add ProgramArguments:2 string $(call shellquote,exec $(call replacehome,$(BUNDLEEXEDIR)/$(SWITCHER_EXEFILE)))) "$$PROPS"; \
-	plutil -convert xml1 "$$PROPS"
+$(M_AGENTDIR)/$(M_AGENTFILE): $(M_AGENTFILETEMPLATE) $(MAKEFILE) | $(M_AGENTDIR)
+	install -M -m 644 /dev/null $(QUOTED.@)
+	python -c 'import $(BUILD_UTILS); $(BUILD_UTILS).processPList()' $(QUOTED.<) \
+	Label                  $(call shellquote,$(call cquote,$(APPNAME))) \
+	ProgramArguments       $(call shellquote,getProgramArguments($(call cquote,$(BUNDLEEXEDIR)/$(SWITCHER_EXEFILE)))) \
+	LimitLoadToSessionType $(call shellquote,getSessionTypes($(call cquote,$(SESSIONTYPE)))) \
+	> $(QUOTED.@)
 
 install: $(M_BUNDLECONTENTSDIR)/$(M_INFOFILE) $(M_BUNDLEEXEDIR)/$(M_SWITCHER_EXEFILE) $(M_BUNDLEEXEDIR)/$(M_MONITOR_EXEFILE) $(M_AGENTDIR)/$(M_AGENTFILE)
 
@@ -130,14 +134,13 @@ unload:
 
 uninstall: unload
 	-rm -rf $(call shellquote,$(BUNDLEDIR))
-	-rm -f $(call shellquote,$(AGENTDIR)/$(AGENTFILE))
+	-rm -f  $(call shellquote,$(AGENTDIR)/$(AGENTFILE))
 
 clean:
-	-rm -f $(call shellquote,$(UTILS_OBJFILE))
-	-rm -f $(call shellquote,$(SWITCHER_OBJFILE))
-	-rm -f $(call shellquote,$(MONITOR_OBJFILE))
+	-rm -f  $(call shellquote,$(UTILS_OBJFILE)) $(call shellquote,$(SWITCHER_OBJFILE)) $(call shellquote,$(MONITOR_OBJFILE))
 
 cleanall: clean
-	-rm -f $(call shellquote,$(SWITCHER_EXEFILE))
-	-rm -f $(call shellquote,$(MONITOR_EXEFILE))
+	-rm -f  $(call shellquote,$(SWITCHER_EXEFILE)) $(call shellquote,$(MONITOR_EXEFILE))
 	-rm -rf $(call shellquote,$(DEFAULT_TARGETDIR))
+	-rm -f  $(call shellquote,$(BUILD_UTILS).pyc)
+	-rm -f  $(call shellquote,$(VARSFILE))

@@ -1,4 +1,6 @@
+.Makefile.vars
 KeyboardMonitor
 InputSourceSwitch
 *.o
+BuildUtils.pyc
 installroot/

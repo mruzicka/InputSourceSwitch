@@ -211,6 +211,7 @@
 	}
 
 	- (void) subscribeToNotifications {
+#if 0
 		[self
 			subscribeToNotification: NSWorkspaceWillSleepNotification
 			withSelector:            @selector (receiveDectivationNote:)
@@ -219,6 +220,7 @@
 			subscribeToNotification: NSWorkspaceDidWakeNotification
 			withSelector:            @selector (receiveActivationNote:)
 		];
+#endif
 		[self
 			subscribeToNotification: NSWorkspaceSessionDidResignActiveNotification
 			withSelector:            @selector (receiveDectivationNote:)
@@ -232,8 +234,10 @@
 
 	- (void) unsubscribeFromNotifications {
 		_subscribed = NO;
+#if 0
 		[self unsubscribeFromNotification: NSWorkspaceWillSleepNotification];
 		[self unsubscribeFromNotification: NSWorkspaceDidWakeNotification];
+#endif
 		[self unsubscribeFromNotification: NSWorkspaceSessionDidResignActiveNotification];
 		[self unsubscribeFromNotification: NSWorkspaceSessionDidBecomeActiveNotification];
 	}
