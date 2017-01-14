@@ -259,7 +259,15 @@ BOOL ISSUCreateBoostrapSubset (mach_port_t *parentBootstrapPort) {
 	if (task_get_bootstrap_port (mach_task_self (), &bootstrapPort) != KERN_SUCCESS)
 		return NO;
 
-	if (bootstrap_subset (bootstrapPort, mach_task_self (), &subsetPort) != BOOTSTRAP_SUCCESS)
+	if (
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+		bootstrap_subset
+#pragma clang diagnostic pop
+		(
+			bootstrapPort, mach_task_self (), &subsetPort
+		) != BOOTSTRAP_SUCCESS
+	)
 		return NO;
 
 	if (task_set_special_port (mach_task_self (), TASK_BOOTSTRAP_PORT, subsetPort) != KERN_SUCCESS) {

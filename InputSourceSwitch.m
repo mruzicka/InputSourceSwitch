@@ -253,7 +253,7 @@
 					dequeue:               YES
 				];
 
-				if (event.type == NSApplicationDefined && event.subtype == ISS_QUIT_EVENT_SUBTYPE) {
+				if (event.type == NSApplicationDefined && (short) event.subtype == ISS_QUIT_EVENT_SUBTYPE) {
 					_returnValue = event.data1;
 					_running = NO;
 				} else
