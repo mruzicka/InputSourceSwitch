@@ -30,11 +30,9 @@
 	NSFileHandle *handle;
 }
 	- (instancetype) init {
-		NSString *name = [[[NSBundle mainBundle] infoDictionary]
-			objectForKey: (__bridge NSString *) kCFBundleExecutableKey
-		];
+		NSString *name = NSBundle.mainBundle.infoDictionary[(__bridge NSString *) kCFBundleExecutableKey];
 		if (!name)
-			name = [NSProcessInfo processInfo].processName;
+			name = NSProcessInfo.processInfo.processName;
 
 		return [self initWithAppName: name];
 	}
@@ -55,7 +53,7 @@
 	}
 
 	- (int) open: (NSString *) appName {
-		NSFileManager *fileManager = [NSFileManager defaultManager];
+		NSFileManager *fileManager = NSFileManager.defaultManager;
 		NSURL *url = [fileManager
 			URLForDirectory:   NSApplicationSupportDirectory
 			inDomain:          NSUserDomainMask
@@ -131,7 +129,7 @@
 
 	- (void) dealloc {
 		if (_isLocked && [self isOwned])
-			[[NSFileManager defaultManager] removeItemAtURL: _url error: nil];
+			[NSFileManager.defaultManager removeItemAtURL: _url error: nil];
 	}
 @end
 
@@ -194,7 +192,7 @@
 	}
 
 	- (void) subscribeToWorkspaceNotification: (NSString *) notificationName withSelector: (SEL) notificationSelector {
-		[[[NSWorkspace sharedWorkspace] notificationCenter]
+		[NSWorkspace.sharedWorkspace.notificationCenter
 			addObserver: self
 			selector:    notificationSelector
 			name:        notificationName
@@ -203,7 +201,7 @@
 	}
 
 	- (void) unsubscribeFromWorkspaceNotification: (NSString *) notificationName {
-		[[[NSWorkspace sharedWorkspace] notificationCenter]
+		[NSWorkspace.sharedWorkspace.notificationCenter
 			removeObserver: self
 			name:           notificationName
 			object:         nil
@@ -250,7 +248,7 @@
 			@autoreleasepool {
 				NSEvent *event = [self
 					nextEventMatchingMask: NSAnyEventMask
-					untilDate:             [NSDate distantFuture]
+					untilDate:             NSDate.distantFuture
 					inMode:                NSDefaultRunLoopMode
 					dequeue:               YES
 				];
@@ -317,7 +315,7 @@
 				otherEventWithType: NSApplicationDefined
 				location:           NSMakePoint (0, 0)
 				modifierFlags:      0
-				timestamp:          [NSProcessInfo processInfo].systemUptime
+				timestamp:          NSProcessInfo.processInfo.systemUptime
 				windowNumber:       0
 				context:            nil
 				subtype:            ISS_QUIT_EVENT_SUBTYPE
@@ -336,9 +334,9 @@
 	- (void) dealloc {
 		// the super class doesn't seem to expect to ever be deallocated,
 		// so here we perform some obvious cleanup
-		[[NSDistributedNotificationCenter defaultCenter] removeObserver: self];
-		[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver: self];
-		[[NSNotificationCenter defaultCenter] removeObserver: self];
+		[NSDistributedNotificationCenter.defaultCenter removeObserver: self];
+		[NSWorkspace.sharedWorkspace.notificationCenter removeObserver: self];
+		[NSNotificationCenter.defaultCenter removeObserver: self];
 	}
 
 	static BOOL isSessionActive (void) {

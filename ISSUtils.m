@@ -236,7 +236,7 @@ BOOL ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], 
 
 NSURL *ISSUGetAbsoluteFileURL (char *filePath) {
 	NSURL *url = [NSURL
-		fileURLWithPath: [[NSFileManager defaultManager] currentDirectoryPath]
+		fileURLWithPath: NSFileManager.defaultManager.currentDirectoryPath
 		isDirectory:     YES
 	];
 	if (!url)
