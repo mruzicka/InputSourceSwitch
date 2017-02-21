@@ -1,3 +1,5 @@
+// vim: filetype=objc
+
 #import <Foundation/Foundation.h>
 
 
