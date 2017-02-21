@@ -77,7 +77,7 @@
 		if (![fileManager createDirectoryAtURL: url withIntermediateDirectories: YES attributes: nil error: nil])
 			return -1;
 
-		return open (_url.fileSystemRepresentation, O_RDWR|O_CREAT, 0644);
+		return open (_url.fileSystemRepresentation, O_RDWR|O_CREAT|O_CLOEXEC, 0644);
 	}
 
 	- (BOOL) lock {
@@ -193,7 +193,7 @@
 		}
 	}
 
-	- (void) subscribeToNotification: (NSString *) notificationName withSelector: (SEL) notificationSelector {
+	- (void) subscribeToWorkspaceNotification: (NSString *) notificationName withSelector: (SEL) notificationSelector {
 		[[[NSWorkspace sharedWorkspace] notificationCenter]
 			addObserver: self
 			selector:    notificationSelector
@@ -202,7 +202,7 @@
 		];
 	}
 
-	- (void) unsubscribeFromNotification: (NSString *) notificationName {
+	- (void) unsubscribeFromWorkspaceNotification: (NSString *) notificationName {
 		[[[NSWorkspace sharedWorkspace] notificationCenter]
 			removeObserver: self
 			name:           notificationName
@@ -213,21 +213,21 @@
 	- (void) subscribeToNotifications {
 #if 0
 		[self
-			subscribeToNotification: NSWorkspaceWillSleepNotification
-			withSelector:            @selector (receiveDectivationNote:)
+			subscribeToWorkspaceNotification: NSWorkspaceWillSleepNotification
+			withSelector:                     @selector (receiveDectivationNote:)
 		];
 		[self
-			subscribeToNotification: NSWorkspaceDidWakeNotification
-			withSelector:            @selector (receiveActivationNote:)
+			subscribeToWorkspaceNotification: NSWorkspaceDidWakeNotification
+			withSelector:                     @selector (receiveActivationNote:)
 		];
 #endif
 		[self
-			subscribeToNotification: NSWorkspaceSessionDidResignActiveNotification
-			withSelector:            @selector (receiveDectivationNote:)
+			subscribeToWorkspaceNotification: NSWorkspaceSessionDidResignActiveNotification
+			withSelector:                     @selector (receiveDectivationNote:)
 		];
 		[self
-			subscribeToNotification: NSWorkspaceSessionDidBecomeActiveNotification
-			withSelector:            @selector (receiveActivationNote:)
+			subscribeToWorkspaceNotification: NSWorkspaceSessionDidBecomeActiveNotification
+			withSelector:                     @selector (receiveActivationNote:)
 		];
 		_subscribed = YES;
 	}
@@ -235,11 +235,11 @@
 	- (void) unsubscribeFromNotifications {
 		_subscribed = NO;
 #if 0
-		[self unsubscribeFromNotification: NSWorkspaceWillSleepNotification];
-		[self unsubscribeFromNotification: NSWorkspaceDidWakeNotification];
+		[self unsubscribeFromWorkspaceNotification: NSWorkspaceWillSleepNotification];
+		[self unsubscribeFromWorkspaceNotification: NSWorkspaceDidWakeNotification];
 #endif
-		[self unsubscribeFromNotification: NSWorkspaceSessionDidResignActiveNotification];
-		[self unsubscribeFromNotification: NSWorkspaceSessionDidBecomeActiveNotification];
+		[self unsubscribeFromWorkspaceNotification: NSWorkspaceSessionDidResignActiveNotification];
+		[self unsubscribeFromWorkspaceNotification: NSWorkspaceSessionDidBecomeActiveNotification];
 	}
 
 	- (void) runLoop {
@@ -326,6 +326,19 @@
 			]
 			atStart: YES
 		];
+	}
+
+	// override to avoid hard exit
+	- (void) terminate: (id) sender {
+		[self quitWithReturnValue: 0];
+	}
+
+	- (void) dealloc {
+		// the super class doesn't seem to expect to ever be deallocated,
+		// so here we perform some obvious cleanup
+		[[NSDistributedNotificationCenter defaultCenter] removeObserver: self];
+		[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver: self];
+		[[NSNotificationCenter defaultCenter] removeObserver: self];
 	}
 
 	static BOOL isSessionActive (void) {
