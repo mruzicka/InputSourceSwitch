@@ -253,11 +253,21 @@ NSString *ISSUGetPerProcessName (char *name, pid_t pid) {
 	return [NSString stringWithFormat: @"%s.%d", name, pid];
 }
 
-BOOL ISSUCreateBoostrapSubset (mach_port_t *parentBootstrapPort) {
-	mach_port_t bootstrapPort, subsetPort;
+mach_port_t ISSUGetBootstrapPort (void) {
+	mach_port_t bootstrapPort;
 
 	if (task_get_bootstrap_port (mach_task_self (), &bootstrapPort) != KERN_SUCCESS)
-		return NO;
+		return MACH_PORT_NULL;
+
+	return bootstrapPort;
+}
+
+mach_port_t ISSUCreateBootstrapSubset (mach_port_t requestorPort) {
+	mach_port_t bootstrapPort = ISSUGetBootstrapPort ();
+	if (bootstrapPort == MACH_PORT_NULL)
+		return MACH_PORT_NULL;
+
+	mach_port_t subsetPort;
 
 	if (
 #pragma clang diagnostic push
@@ -265,18 +275,30 @@ BOOL ISSUCreateBoostrapSubset (mach_port_t *parentBootstrapPort) {
 		bootstrap_subset
 #pragma clang diagnostic pop
 		(
-			bootstrapPort, mach_task_self (), &subsetPort
+			bootstrapPort, requestorPort, &subsetPort
 		) != BOOTSTRAP_SUCCESS
 	)
-		return NO;
+		return MACH_PORT_NULL;
 
 	if (task_set_special_port (mach_task_self (), TASK_BOOTSTRAP_PORT, subsetPort) != KERN_SUCCESS) {
 		mach_port_destroy (mach_task_self (), subsetPort);
-		return NO;
+		return MACH_PORT_NULL;
 	}
 
-	if (parentBootstrapPort)
-		*parentBootstrapPort = bootstrapPort;
+	return bootstrapPort;
+}
+
+BOOL ISSUResetBootstrapPort (mach_port_t bootstrapPort) {
+	mach_port_t subsetPort = ISSUGetBootstrapPort ();
+	if (bootstrapPort == MACH_PORT_NULL)
+		return NO;
+
+	if (task_set_special_port (mach_task_self (), TASK_BOOTSTRAP_PORT, bootstrapPort) != KERN_SUCCESS)
+		return NO;
+
+	if (mach_port_destroy (mach_task_self (), subsetPort) != KERN_SUCCESS)
+		return NO;
+
 	return YES;
 }
 
@@ -340,23 +362,24 @@ BOOL ISSUPortRightsSend (ISSUMachPort *port, mach_port_t rightsArray[], int righ
 	return (mach_msg_send (&msg->header) == KERN_SUCCESS);
 }
 
-BOOL ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], int rightsCount) {
+int ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], int maxRightsCount) {
 	if (!(msg->msgh_bits & MACH_MSGH_BITS_COMPLEX))
-		return NO;
+		return -1;
 
 	if (msg->msgh_size < sizeof (mach_msg_header_t) + sizeof (mach_msg_body_t))
-		return NO;
+		return -1;
 
 	mach_msg_body_t *body = (mach_msg_body_t *) (msg + 1);
 	int count = body->msgh_descriptor_count;
 	void *end = ((uint8_t *) msg) + msg->msgh_size;
+	int remainingRightsCount = maxRightsCount;
 
 	for (
 		mach_msg_descriptor_t *next = (mach_msg_descriptor_t *) (body + 1)
 		;
-		rightsCount > 0
+		remainingRightsCount > 0
 		;
-		--rightsCount, ++rightsArray
+		--remainingRightsCount, ++rightsArray
 	) {
 		for (
 			mach_msg_descriptor_t *current = next
@@ -370,13 +393,13 @@ BOOL ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], i
 				goto continue_outer;
 			}
 		}
-		return NO;
+		break;
 
 	continue_outer:
 		;
 	}
 
-	return YES;
+	return (maxRightsCount - remainingRightsCount);
 }
 
 BOOL ISSUCommandSend (ISSUMachPort *port, int command) {

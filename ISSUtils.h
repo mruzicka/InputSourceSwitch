@@ -55,7 +55,11 @@ NSURL *ISSUGetAbsoluteFileURL (char *filePath);
 
 NSString *ISSUGetPerProcessName (char *name, pid_t pid);
 
-BOOL ISSUCreateBoostrapSubset (mach_port_t *parentBootstrapPort);
+mach_port_t ISSUGetBootstrapPort (void);
+
+mach_port_t ISSUCreateBootstrapSubset (mach_port_t requestorPort);
+
+BOOL ISSUResetBootstrapPort (mach_port_t bootstrapPort);
 
 BOOL ISSUGetAuditToken (mach_msg_header_t *msg, audit_token_t **auditToken);
 
@@ -63,7 +67,7 @@ mach_msg_descriptor_t *ISSUNextDescriptor (mach_msg_descriptor_t *current);
 
 BOOL ISSUPortRightsSend (ISSUMachPort *port, mach_port_t rightsArray[], int rightsCount);
 
-BOOL ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], int rightsCount);
+int ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], int maxRightsCount);
 
 BOOL ISSUCommandSend (ISSUMachPort *port, int command);
 

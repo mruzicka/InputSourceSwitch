@@ -357,10 +357,10 @@
 	static void portExchangeHandler (ISSUMachPort *port, mach_msg_header_t *msg, void *info) {
 		InputSourceSwitchApplication *instance = (__bridge InputSourceSwitchApplication *) info;
 		ISSUMachPort *listenPort, *sendPort;
-		mach_port_t machPort;
+		mach_port_t machPort[instance->_monitorPID > 0 ? 1 : 2];
 		BOOL ignore;
 
-		if (instance->_monitorPID > 0) {
+		if (ISSUArrayLength (machPort) < 2) {
 			audit_token_t *auditToken;
 
 			if (ISSUGetAuditToken (msg, &auditToken)) {
@@ -371,17 +371,22 @@
 				ignore = YES;
 				NSLog (@"Ignoring message without audit token.");
 			}
-		} else
+		} else {
+			if ((machPort[1] = ISSUGetBootstrapPort ()) == MACH_PORT_NULL) {
+				NSLog (@"Failed to retrieve bootstrap port.");
+				goto error_exit;
+			}
 			ignore = NO;
+		}
 
-		if (!ISSUPortRightsReceive (msg, &machPort, 1)) {
+		if (!ISSUPortRightsReceive (msg, machPort, 1)) {
 			if (ignore)
 				return;
 			NSLog (@"Failed to receive mach port rights.");
 			goto error_exit;
 		}
 
-		if (!(sendPort = [[ISSUMachPort alloc] initWithMachPort: machPort])) {
+		if (!(sendPort = [[ISSUMachPort alloc] initWithMachPort: machPort[0]])) {
 			if (ignore)
 				return;
 			NSLog (@"Failed to create send mach port.");
@@ -410,10 +415,10 @@
 			goto error_exit;
 		}
 
-		machPort = listenPort.machPort;
+		machPort[0] = listenPort.machPort;
 
 		// send the new listen port to the monitor process
-		if (!ISSUPortRightsSend (instance->_sendPort, &machPort, 1)) {
+		if (!ISSUPortRightsSend (instance->_sendPort, machPort, ISSUArrayLength (machPort))) {
 			NSLog (@"Failed to send mach port rights.");
 			goto error_exit;
 		}
@@ -421,6 +426,11 @@
 		if (isSessionActive ())
 			[instance sendMonitorCommand: ISS_CMD_ACTIVATE_MONITOR];
 
+		// N.B. since the "server port" was used as the requestor port when creating
+		// the bootstrap subset passed as the bootstrap port to the monitor process
+		// its deallocation below will cause the bootstrap subset to be destroyed
+		// and in effect the monitor process's bootstrap port to become a dead port
+		// unless/until the monitor process resets its bootstrap port
 		instance->_listenPort = listenPort;
 		instance->_bsm = nil; // this is not needed beyond port exchange
 
@@ -539,13 +549,9 @@ static NSURL *getMonitorExecutableURL (char *argv0) {
 	];
 }
 
-static ISSUMachPortHolder *createServerPort (void) {
+static ISSUMachPortHolder *createServerPortHolder (ISSUMachPort *port) {
 	NSString *name = ISSUGetPerProcessName (ISS_SERVER_PORT_NAME, getpid ());
 	if (!name)
-		return nil;
-
-	ISSUMachPort *port = [ISSUMachPort new];
-	if (!port)
 		return nil;
 
 	if (![port registerName: name])
@@ -583,14 +589,17 @@ int main (int argc, char * const argv[]) {
 			goto error_exit;
 		}
 
-		// if the creation of the bootstrap subset (a private namespace for port
-		// registrations) is successfull we don't need to verify the identity of
-		// the monitor process when it checks in as no other process can obtain
-		// ports registered in the subset
-		BOOL privateBootstrapNamespace = ISSUCreateBoostrapSubset (NULL);
-
-		if (!(serverPortHolder = createServerPort ())) {
+		ISSUMachPort *port = [ISSUMachPort new];
+		if (!port) {
 			NSLog (@"Failed to create server mach port.");
+			goto error_exit;
+		}
+
+		// try to create a bootstrap subset / private bootstrap namespace
+		mach_port_t bootstrapPort = ISSUCreateBootstrapSubset (port.machPort);
+
+		if (!(serverPortHolder = createServerPortHolder (port))) {
+			NSLog (@"Failed to register server mach port.");
 			goto error_exit;
 		}
 
@@ -609,15 +618,23 @@ int main (int argc, char * const argv[]) {
 			}
 		}
 
+		// parent / switch application
+
 		// we negate the PID if the server port is registered in a private bootstrap
 		// namespace
-		// the negative PID causes the InputSourceSwitchApplication to skip the
-		// verification of the identity of the monitor process
-		if (privateBootstrapNamespace)
+		// the negative PID causes the monitor process identity verification to be
+		// skipped by the InputSourceSwitchApplication, which is ok, as no foreign
+		// processes can get access to the ports registered in the private bootstrap
+		// namespace
+		if (bootstrapPort != MACH_PORT_NULL) {
+			if (!ISSUResetBootstrapPort (bootstrapPort)) {
+				NSLog (@"Failed to restore bootstrap port.");
+				goto error_exit;
+			}
 			pid = -pid;
+		}
 	}
 
-	// parent / switch application
 	[InputSourceSwitchApplication sharedApplication];
 	if (!NSApp)
 		goto error_exit;

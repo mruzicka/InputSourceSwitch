@@ -574,14 +574,24 @@ KeyboardMonitorApplication *MonitorApp;
 
 	static void portExchangeHandler (ISSUMachPort *port, mach_msg_header_t *msg, void *info) {
 		KeyboardMonitorApplication *instance = (__bridge KeyboardMonitorApplication *) info;
-		mach_port_t machPort;
+		mach_port_t machPort[2];
 
-		if (!ISSUPortRightsReceive (msg, &machPort, 1)) {
-			NSLog (@"Failed to receive mach port rights.");
-			goto error_exit;
+		switch (ISSUPortRightsReceive (msg, machPort, ISSUArrayLength (machPort))) {
+			default: // > 1
+				if (!ISSUResetBootstrapPort (machPort[1])) {
+					NSLog (@"Failed to reset bootstrap port.");
+					goto error_exit;
+				}
+				// fall through
+			case 1:
+				break;
+			case 0:
+			case -1:
+				NSLog (@"Failed to receive mach port rights.");
+				goto error_exit;
 		}
 
-		if (!(instance->_sendPort = [[ISSUMachPort alloc] initWithMachPort: machPort])) {
+		if (!(instance->_sendPort = [[ISSUMachPort alloc] initWithMachPort: machPort[0]])) {
 			NSLog (@"Failed to create send mach port.");
 			goto error_exit;
 		}
