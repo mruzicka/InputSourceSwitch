@@ -247,13 +247,13 @@
 		do {
 			@autoreleasepool {
 				NSEvent *event = [self
-					nextEventMatchingMask: NSAnyEventMask
+					nextEventMatchingMask: NSEventMaskAny
 					untilDate:             NSDate.distantFuture
 					inMode:                NSDefaultRunLoopMode
 					dequeue:               YES
 				];
 
-				if (event.type == NSApplicationDefined && (short) event.subtype == ISS_QUIT_EVENT_SUBTYPE) {
+				if (event.type == NSEventTypeApplicationDefined && (short) event.subtype == ISS_QUIT_EVENT_SUBTYPE) {
 					_returnValue = event.data1;
 					_running = NO;
 				} else
@@ -312,7 +312,7 @@
 	- (void) quitWithReturnValue: (int) returnValue {
 		[self
 			postEvent: [NSEvent
-				otherEventWithType: NSApplicationDefined
+				otherEventWithType: NSEventTypeApplicationDefined
 				location:           NSMakePoint (0, 0)
 				modifierFlags:      0
 				timestamp:          NSProcessInfo.processInfo.systemUptime
