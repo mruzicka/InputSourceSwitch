@@ -346,12 +346,7 @@
 
 		CFTypeRef isActiveValueRef = (__bridge CFTypeRef) sessionInfo[(__bridge NSString *) kCGSessionOnConsoleKey];
 
-		return
-			isActiveValueRef
-			&&
-			CFGetTypeID (isActiveValueRef) == CFBooleanGetTypeID ()
-			&&
-			CFBooleanGetValue (isActiveValueRef);
+		return isBooleanTrue (isActiveValueRef);
 	}
 
 	static void portExchangeHandler (ISSUMachPort *port, mach_msg_header_t *msg, void *info) {
@@ -473,8 +468,9 @@
 			},
 			NO
 		);
+		NSUInteger count;
 
-		if ([inputSources count] < 2)
+		if ((count = [inputSources count]) < 2)
 			return; // no point to switch if less than two sources are available
 
 		[inputSources enumerateObjectsUsingBlock: ^ (id element, NSUInteger idx, BOOL *stop) {
@@ -484,20 +480,23 @@
 				kTISPropertyInputSourceIsSelected
 			);
 
-			if (
-				isSelectedValueRef
-				&&
-				CFGetTypeID (isSelectedValueRef) == CFBooleanGetTypeID ()
-				&&
-				CFBooleanGetValue (isSelectedValueRef)
-			) {
-				inputSource = (__bridge TISInputSourceRef) inputSources[(idx + 1) % [inputSources count]];
+			if (isBooleanTrue (isSelectedValueRef)) {
+				inputSource = (__bridge TISInputSourceRef) inputSources[(idx + 1) % count];
 
 				TISSelectInputSource (inputSource);
 
 				*stop = YES;
 			}
 		}];
+	}
+
+	static BOOL isBooleanTrue (CFTypeRef valueRef) {
+		return
+			valueRef
+			&&
+			CFGetTypeID (valueRef) == CFBooleanGetTypeID ()
+			&&
+			CFBooleanGetValue (valueRef);
 	}
 @end
 
