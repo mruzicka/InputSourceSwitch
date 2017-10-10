@@ -559,13 +559,13 @@ static ISSUMachPortHolder *createServerPortHolder (ISSUMachPort *port) {
 	return [ISSUMachPortHolder holderWithPort: port];
 }
 
-
-int main (int argc, char * const argv[]) {
+int autoreleasedMain (int argc, char * const argv[]) {
 	LockFile *lockFile;
+	NSArray *signalHandlerManagers;
 	ISSUMachPortHolder *serverPortHolder;
 	pid_t pid;
 
-	if (!ISSUSetupSignalHandlers (signalHandlerTable, ISSUArrayLength (signalHandlerTable))) {
+	if (!(signalHandlerManagers = ISSUSetupSignalHandlers (signalHandlerTable, ISSUArrayLength (signalHandlerTable)))) {
 		NSLog (@"Failed to setup signal handlers.");
 		goto error_exit;
 	}

@@ -10,7 +10,7 @@
 
 typedef struct {
 	int signum;
-	void (*handler) (void *info);
+	dispatch_function_t handler;
 } ISSUSignalHandlerTableEntry;
 
 typedef void (*ISSUMachPortMessageCallBack) (ISSUMachPort *port, mach_msg_header_t *msg, void *info);
@@ -46,10 +46,7 @@ typedef void (*ISSUMachPortInvalidationCallBack) (ISSUMachPort *port, void *info
 	- (void) set: (ISSUMachPort *) port;
 @end
 
-
-BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info), void *info);
-
-BOOL ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount);
+NSArray *ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount);
 
 NSURL *ISSUGetAbsoluteFileURL (char *filePath);
 
@@ -72,3 +69,5 @@ int ISSUPortRightsReceive (mach_msg_header_t *msg, mach_port_t rightsArray[], in
 BOOL ISSUCommandSend (ISSUMachPort *port, int command);
 
 BOOL ISSUCommandReceive (mach_msg_header_t *msg, int *command);
+
+int autoreleasedMain (int argc, char * const argv[]);

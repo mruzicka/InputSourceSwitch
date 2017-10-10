@@ -673,11 +673,11 @@ static ISSUMachPortHolder *createClientPort (void) {
 	return [ISSUMachPortHolder holderWithPort: port];
 }
 
-
-int main (int argc, char *argv[]) {
+int autoreleasedMain (int argc, char * const argv[]) {
+	NSArray *signalHandlerManagers;
 	ISSUMachPortHolder *clientPortHolder;
 
-	if (!ISSUSetupSignalHandlers (signalHandlerTable, ISSUArrayLength (signalHandlerTable))) {
+	if (!(signalHandlerManagers = ISSUSetupSignalHandlers (signalHandlerTable, ISSUArrayLength (signalHandlerTable)))) {
 		NSLog (@"Failed to setup signal handlers.");
 		goto error_exit;
 	}

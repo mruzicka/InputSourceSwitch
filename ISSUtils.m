@@ -184,54 +184,86 @@
 @end
 
 
-static void ISSUNoopHandler (int signum) {
+@interface ISSUSignalHandlerManager : NSObject
+	+ (instancetype) managerForSignalHandlerTableEntry: (ISSUSignalHandlerTableEntry *) entry;
+
+	- (instancetype) init NS_UNAVAILABLE;
+	- (instancetype) initForSignalHandlerTableEntry: (ISSUSignalHandlerTableEntry *) entry;
+@end
+
+@implementation ISSUSignalHandlerManager {
+	int _signum;
+	struct sigaction _action;
+	dispatch_source_t _dispatchSource;
 }
-
-BOOL ISSUSetupSignalHandler (int signum, void (*handler) (void *info), void *info) {
-	dispatch_source_t source = dispatch_source_create (DISPATCH_SOURCE_TYPE_SIGNAL, signum, 0, dispatch_get_main_queue ());
-	if (!source)
-		return NO;
-
-	// setup a noop handler to ensure the signal is delivered
-	// and doesn't kill the process (note that using SIG_IGN
-	// instead of a noop handler doesn't work for at least the
-	// SIGCHLD signal)
-	{
-		struct sigaction action;
-
-		memset (&action, 0, sizeof (action));
-		action.sa_handler = &ISSUNoopHandler;
-		action.sa_flags = SA_RESTART;
-
-		if (sigaction (signum, &action, NULL) != 0)
-			return NO;
+	+ (instancetype) managerForSignalHandlerTableEntry: (ISSUSignalHandlerTableEntry *) entry {
+		return [[self alloc] initForSignalHandlerTableEntry: entry];
 	}
 
-	dispatch_set_context (source, info);
-	dispatch_source_set_event_handler_f (source, handler);
+	- (instancetype) initForSignalHandlerTableEntry: (ISSUSignalHandlerTableEntry *) entry {
+		if (!entry)
+			return nil;
 
-	dispatch_resume (source);
+		if (self = [super init]) {
+			int signum = entry->signum;
 
-	// make sure the source is not deallocated
-	// (note that this is a memory leak, but the expectation is
-	// the signal handler is to be installed for the entire
-	// lifetime of the process so the signal source would never
-	// be deallocated anyway)
-	CFRetain ((__bridge CFTypeRef) source);
+			// setup a noop handler to ensure the signal is delivered
+			// and doesn't kill the process (note that using SIG_IGN
+			// instead of a noop handler doesn't work for at least the
+			// SIGCHLD signal)
+			{
+				struct sigaction action;
 
-	return YES;
-}
+				memset (&action, 0, sizeof (action));
+				action.sa_handler = &ISSUNoopHandler;
 
-BOOL ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount) {
-	for (; entryCount > 0; --entryCount, ++signalHandlerTable)
-		if (!ISSUSetupSignalHandler (
-			signalHandlerTable->signum,
-			signalHandlerTable->handler,
-			(uint8_t *) NULL + signalHandlerTable->signum
-		))
-			return NO;
+				if (sigaction (signum, &action, &_action) != 0)
+					return nil;
+			}
 
-	return YES;
+			_signum = signum; // dealloc resets the signal action if _signum is set
+
+			dispatch_source_t source = dispatch_source_create (DISPATCH_SOURCE_TYPE_SIGNAL, signum, 0, dispatch_get_main_queue ());
+			if (!source)
+				return nil;
+
+			dispatch_set_context (source, (uint8_t *) NULL + signum);
+			dispatch_source_set_event_handler_f (source, entry->handler);
+
+			dispatch_resume (source);
+
+			_dispatchSource = source;
+		}
+		return self;
+	}
+
+	- (void) dealloc {
+		if (_dispatchSource)
+			dispatch_source_cancel (_dispatchSource);
+		if (_signum)
+			sigaction (_signum, &_action, NULL);
+	}
+
+	static void ISSUNoopHandler (int signum) {
+	}
+@end
+
+NSArray *ISSUSetupSignalHandlers (ISSUSignalHandlerTableEntry signalHandlerTable[], int entryCount) {
+	@autoreleasepool {
+		NSMutableArray *managers = [NSMutableArray arrayWithCapacity: entryCount];
+		if (!managers)
+			return nil;
+
+		for (; entryCount > 0; --entryCount, ++signalHandlerTable) {
+			ISSUSignalHandlerManager *manager = [ISSUSignalHandlerManager managerForSignalHandlerTableEntry: signalHandlerTable];
+			if (!manager)
+				return nil;
+
+			[managers addObject: manager];
+		}
+
+		return managers;
+	}
 }
 
 NSURL *ISSUGetAbsoluteFileURL (char *filePath) {
@@ -426,4 +458,10 @@ BOOL ISSUCommandReceive (mach_msg_header_t *msg, int *command) {
 
 	*command = msg->msgh_id;
 	return YES;
+}
+
+int main (int argc, char * const argv[]) {
+	@autoreleasepool {
+		return autoreleasedMain (argc, argv);
+	}
 }
