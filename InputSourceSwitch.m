@@ -18,6 +18,11 @@
 #define ISS_ERROR_EXIT_CODE 127
 
 
+CFMessagePortRef CFMessagePortCreatePerProcessRemote (CFAllocatorRef allocator, CFStringRef name, CFIndex pid);
+
+BOOL _CreateFlattenedInputSource (TISInputSourceRef inputSource, CFDictionaryRef *flattendProperties);
+
+
 @interface LockFile : NSObject
 	@property (readonly) NSURL *url;
 	@property (readonly) BOOL isLocked;
@@ -483,11 +488,163 @@
 			if (isBooleanTrue (isSelectedValueRef)) {
 				inputSource = (__bridge TISInputSourceRef) inputSources[(idx + 1) % count];
 
-				TISSelectInputSource (inputSource);
+				selectInputSource (inputSource);
 
 				*stop = YES;
 			}
 		}];
+	}
+
+	static void selectInputSource (TISInputSourceRef inputSource) {
+		// send the input source select TSM message first
+		if (!sendSelectInputSourceTSMMessage (inputSource)) {
+			// try the traditional way if the input source select TSM message didn't work
+			TISSelectInputSource (inputSource);
+		}
+	}
+
+	static BOOL sendSelectInputSourceTSMMessage (TISInputSourceRef inputSource) {
+		NSDictionary *ownerProperties = getCurrentInputSourceOwnerProperties ();
+		if (!ownerProperties)
+			return NO;
+
+		pid_t ownerPid;
+		if (!getInputSourceOwnerPid (ownerProperties, &ownerPid))
+			return NO;
+
+		{
+			NSData *messageData = getInputSourceSelectTSMMessageData (inputSource, ownerProperties);
+			if (!messageData)
+				return NO;
+
+			CFMessagePortRef ownerTSMPort = CFMessagePortCreatePerProcessRemote (kCFAllocatorDefault, CFSTR ("com.apple.tsm.portname"), ownerPid);
+			if (!ownerTSMPort) {
+				NSLog (@"Failed to open TSM port to input source onwer PID %d.", ownerPid);
+				return NO;
+			}
+
+			NSData *responseData;
+			SInt32 result = CFMessagePortSendRequest (
+				ownerTSMPort, 7, (__bridge CFDataRef) messageData, 1.0, 1.0, CFSTR ("TSM Message"), (void *) &responseData
+			);
+
+			CFMessagePortInvalidate (ownerTSMPort);
+			CFRelease (ownerTSMPort);
+
+			if (result != 0) {
+				NSLog (@"Failed to send input source select TSM message to the input source owner PID %d.", ownerPid);
+				return NO;
+			}
+			if (!responseData) {
+				NSLog (@"No response to select input source TSM message from PID %d.", ownerPid);
+				return NO;
+			}
+
+#if 0
+			NSLog (@"Input source select TSM message response from PID %d:\n%.*s", ownerPid, (int) responseData.length, responseData.bytes);
+#endif
+		}
+
+		{
+			id selectedInputSource = (__bridge_transfer id) TISCopyCurrentKeyboardInputSource ();
+
+			if (CFEqual ((__bridge TISInputSourceRef) selectedInputSource, inputSource))
+				return YES;
+		}
+
+		NSLog (@"The input source select TSM message didn't work for PID %d.", ownerPid);
+		return NO;
+	}
+
+	static NSDictionary *getCurrentInputSourceOwnerProperties (void) {
+		NSDictionary *properties;
+		CFMessagePortRef serverTSMPort = CFMessagePortCreateRemote (kCFAllocatorDefault, CFSTR ("com.apple.tsm.uiserver"));
+		if (!serverTSMPort) {
+			NSLog (@"Failed to open TIM Core TSM port.");
+			return nil;
+		}
+
+		NSData *responseData;
+		SInt32 result = CFMessagePortSendRequest (serverTSMPort, 20, NULL, 1.0, 1.0, CFSTR ("TIM Core Request"), (void *) &responseData);
+
+		CFMessagePortInvalidate (serverTSMPort);
+		CFRelease (serverTSMPort);
+
+		if (result != 0) {
+			NSLog (@"Failed to send current input source owner TIM Core TSM request.");
+			return nil;
+		}
+
+		properties = (__bridge_transfer NSDictionary *) CFPropertyListCreateWithData (
+			kCFAllocatorDefault, (__bridge CFDataRef) responseData, kCFPropertyListImmutable, NULL, NULL
+		);
+		if (!properties) {
+			NSLog (@"Failed to parse current input source owner TIM Core TSM response.");
+			return nil;
+		}
+
+		return properties;
+	}
+
+	static BOOL getInputSourceOwnerPid (NSDictionary *ownerProperties, pid_t *pidPointer) {
+		NSArray *psnData = ownerProperties[@"tsmMessagePSNKey"];
+		if (!psnData) {
+			NSLog (@"Input source owner properties do not include process serial number:\n%@", ownerProperties.descriptionInStringsFileFormat);
+			return NO;
+		}
+
+		ProcessSerialNumber psn;
+		psn.highLongOfPSN = [psnData[0] unsignedLongValue];
+		psn.lowLongOfPSN = [psnData[1] unsignedLongValue];
+
+		if (
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+			GetProcessPID
+#pragma clang diagnostic pop
+			(
+				&psn,
+				pidPointer
+			) != 0
+		) {
+			NSLog (@"Failed to obtain PID of the input source owner PSN %u:%u.", psn.highLongOfPSN, psn.lowLongOfPSN);
+			return NO;
+		}
+
+		return YES;
+	}
+
+	static NSData *getInputSourceSelectTSMMessageData (TISInputSourceRef inputSource, NSDictionary *ownerProperties) {
+		NSMutableDictionary *messageDataDictionary = [NSMutableDictionary dictionaryWithCapacity: 2];
+
+		{
+			NSDictionary *flattenedProperties;
+
+			if (!_CreateFlattenedInputSource (inputSource, (void *) &flattenedProperties)) {
+				NSLog (@"Failed to obtain input source flattened properties.");
+				return nil;
+			}
+
+			messageDataDictionary[@"tsmInputSourceSelectedInpSrcKey"] = flattenedProperties;
+		}
+
+		{
+			id selectedTargetTSMDocKey = ownerProperties[@"tsmTargetTSMDocumentKeyKey"];
+
+			if (selectedTargetTSMDocKey) {
+				messageDataDictionary[@"tsmInputSourceSelectedTSMDocKey"] = selectedTargetTSMDocKey;
+			}
+		}
+
+		NSData *messageData = (__bridge_transfer NSData *) CFPropertyListCreateData (
+			kCFAllocatorDefault, (__bridge CFDictionaryRef) messageDataDictionary, kCFPropertyListXMLFormat_v1_0, 0, NULL
+		);
+		if (!messageData) {
+			NSLog (@"Failed to serialize input source select message data.");
+			return nil;
+		}
+
+		return messageData;
 	}
 
 	static BOOL isBooleanTrue (CFTypeRef valueRef) {
